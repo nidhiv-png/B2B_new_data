@@ -1,0 +1,103 @@
+relationships:
+
+  # Account → Plan (current plan assignment)
+  - source_entity: Account
+    target_entity: Plan
+    relationship_type: many_to_one
+    via: current_plan_id
+
+  # Account → DimCSM (CSM ownership)
+  - source_entity: Account
+    target_entity: DimCSM
+    relationship_type: many_to_one
+    via: csm_owner_id
+
+  # User → Account (user belongs to an account)
+  - source_entity: User
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # User → Cohort (user belongs to a signup cohort)
+  - source_entity: User
+    target_entity: Cohort
+    relationship_type: many_to_one
+    via: cohort_id
+
+  # Visitor → Campaign (visitor came from a campaign)
+  - source_entity: Visitor
+    target_entity: Campaign
+    relationship_type: many_to_one
+    via: campaign_id
+
+  # Visitor → User (visitor converted to user; nullable)
+  - source_entity: Visitor
+    target_entity: User
+    relationship_type: many_to_one
+    via: user_id
+
+  # Seat → Account
+  - source_entity: Seat
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # Seat → User
+  - source_entity: Seat
+    target_entity: User
+    relationship_type: one_to_one
+    via: user_id
+
+  # Seat → Plan
+  - source_entity: Seat
+    target_entity: Plan
+    relationship_type: many_to_one
+    via: plan_id
+
+  # Contract → Account
+  - source_entity: Contract
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # Contract → Plan
+  - source_entity: Contract
+    target_entity: Plan
+    relationship_type: many_to_one
+    via: plan_id
+
+  # UsageEvent → User
+  - source_entity: UsageEvent
+    target_entity: User
+    relationship_type: many_to_one
+    via: user_id
+
+  # UsageEvent → Account
+  - source_entity: UsageEvent
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # SupportTicket → Account
+  - source_entity: SupportTicket
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # SupportTicket → User
+  - source_entity: SupportTicket
+    target_entity: User
+    relationship_type: many_to_one
+    via: user_id
+
+  # ExpansionOpportunity → Account
+  - source_entity: ExpansionOpportunity
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # HealthScoreSnapshot → Account
+  - source_entity: HealthScoreSnapshot
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id

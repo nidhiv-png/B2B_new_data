@@ -1,0 +1,226 @@
+entities:
+
+  DimCSM:
+    id: csm_id
+    type: dimension
+    scope: static
+    attributes:
+      - csm_name
+      - csm_email
+      - team
+      - capacity_accounts
+      - segment_focus
+      - active_from
+      - active_to
+
+  Plan:
+    id: plan_id
+    type: dimension
+    scope: scd2
+    attributes:
+      - plan_name
+      - tier
+      - price_per_seat_monthly
+      - max_seats
+      - total_features_count
+      - is_self_serve
+      - effective_from
+      - effective_to
+
+  Campaign:
+    id: campaign_id
+    type: acquisition
+    scope: monthly
+    attributes:
+      - campaign_name
+      - channel
+      - geo
+      - icp_segment_target
+      - industry_target
+      - start_date
+      - end_date
+      - budget_usd
+      - impressions
+      - clicks
+      - conversions
+      - spend_usd
+      - cpm
+      - ctr
+      - time_period
+
+  Account:
+    id: account_id
+    type: core
+    scope: lifecycle
+    attributes:
+      - company_name
+      - industry
+      - employee_count
+      - annual_revenue_usd
+      - country
+      - region
+      - icp_segment
+      - lifecycle_state
+      - current_plan_id
+      - csm_owner_id
+      - am_owner_id
+      - is_self_serve
+      - acquisition_channel
+      - first_paid_at
+      - created_at
+      - time_period
+
+  Cohort:
+    id: cohort_id
+    type: dimension
+    scope: monthly
+    attributes:
+      - cohort_period
+      - cohort_start_date
+      - channel_origin
+      - user_count
+      - activated_count
+      - activation_rate
+      - time_period
+
+  User:
+    id: user_id
+    type: core
+    scope: lifecycle
+    attributes:
+      - account_id
+      - cohort_id
+      - full_name
+      - email
+      - role
+      - department
+      - is_admin
+      - lifecycle_state
+      - signup_at
+      - activated_at
+      - last_seen_at
+      - time_period
+
+  Visitor:
+    id: visitor_id
+    type: acquisition
+    scope: pre_signup
+    attributes:
+      - campaign_id
+      - anonymous_id
+      - first_seen_at
+      - last_seen_at
+      - landing_page
+      - referrer_url
+      - geo_country
+      - device_type
+      - page_views
+      - session_count
+      - did_signup
+      - user_id
+      - est_account_size_band
+      - est_industry
+      - time_period
+
+  Seat:
+    id: seat_id
+    type: monetisation
+    scope: per_user
+    attributes:
+      - account_id
+      - user_id
+      - plan_id
+      - seat_type
+      - seat_mrr
+      - billing_cycle
+      - is_paid
+      - assigned_at
+      - churned_at
+      - time_period
+
+  Contract:
+    id: contract_id
+    type: monetisation
+    scope: per_account
+    attributes:
+      - account_id
+      - plan_id
+      - status
+      - total_seats
+      - arr_usd
+      - mrr_usd
+      - billing_cycle
+      - start_at
+      - end_at
+      - renewal_date
+      - discount_pct
+      - time_period
+
+  UsageEvent:
+    id: event_id
+    type: activation
+    scope: event
+    attributes:
+      - user_id
+      - account_id
+      - event_name
+      - feature_name
+      - is_core_action
+      - onboarding_step_name
+      - session_id
+      - platform
+      - occurred_at
+      - time_period
+
+  SupportTicket:
+    id: ticket_id
+    type: retention
+    scope: event
+    attributes:
+      - account_id
+      - user_id
+      - subject
+      - category
+      - priority
+      - status
+      - channel
+      - opened_at
+      - resolved_at
+      - resolution_hours
+      - csat_score
+      - time_period
+
+  ExpansionOpportunity:
+    id: opportunity_id
+    type: expansion
+    scope: per_account
+    attributes:
+      - account_id
+      - owner_csm_id
+      - opportunity_type
+      - stage
+      - expansion_mrr_potential
+      - current_seats
+      - proposed_seats
+      - current_plan_id
+      - proposed_plan_id
+      - identified_at
+      - closed_at
+      - outcome
+      - time_period
+
+  HealthScoreSnapshot:
+    id: snapshot_id
+    type: retention
+    scope: weekly
+    attributes:
+      - account_id
+      - week_start
+      - score
+      - dau_mau_ratio
+      - core_actions_per_user
+      - feature_breadth
+      - support_tickets_open
+      - health_band
+      - plan_tier
+      - time_period
