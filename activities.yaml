@@ -1,262 +1,220 @@
+# Regenerated from the real generator logic (simulation.py). Documents which
+# events/state-changes each workflow actually emits — no metric formulas.
+# Grouped to match vedha_tessera_model_v2.html's Entities/Activities/Dimensions
+# schema (Financial -> Company -> Functional).
+
 activities:
 
-  # ── Acquisition ──────────────────────────────────────────────────────────────
+  # ── Financial — P&L ──────────────────────────────────────────────────────
+
+  - name: recognise_revenue
+    entity: RevenueLine
+    type: create
+    attributes: [revenue_line_id, revenue_type, amount_usd, occurred_at]
+
+  # incur_cost is Cost & Burn's `incur` (below) rolling up into P&L; forecast
+  # is not modeled (no forward-looking projection table exists).
+
+  # ── Company — Cost & Burn ────────────────────────────────────────────────
+
+  - name: incur
+    entity: CostTransaction
+    type: create
+    attributes: [cost_id, vendor_id, cost_line, function, amount_usd, occurred_at]
+
+  - name: allocate
+    entity: Headcount
+    type: snapshot
+    attributes: [headcount_id, function, headcount_count, people_cost_usd]
+
+  # ── Company — Revenue engine (MRR movement bridge) ──────────────────────
+
+  - name: new
+    entity: MrrMovement
+    type: create
+    attributes: [movement_id, account_id, mrr_delta_usd, seats_delta, occurred_at]
+
+  - name: reactivate
+    entity: MrrMovement
+    type: create
+    attributes: [movement_id, account_id, mrr_delta_usd, occurred_at]
+
+  - name: expand
+    entity: MrrMovement
+    type: create
+    attributes: [movement_id, account_id, mrr_delta_usd, seats_delta, occurred_at]
+
+  - name: contract        # HTML's own name for the Contraction movement type
+    entity: MrrMovement
+    type: create
+    attributes: [movement_id, account_id, mrr_delta_usd, occurred_at]
+
+  - name: churn
+    entity: MrrMovement
+    type: create
+    attributes: [movement_id, account_id, mrr_delta_usd, seats_delta, occurred_at]
+
+  - name: renew
+    entity: MrrMovement
+    type: create
+    attributes: [movement_id, account_id, mrr_delta_usd, occurred_at]
+
+  # ── Acquisition ───────────────────────────────────────────────────────────
 
   - name: campaign_launched
     entity: Campaign
     type: create
-    attributes:
-      - campaign_id
-      - campaign_name
-      - channel
-      - start_date
-      - budget_usd
-      - launched_at
+    attributes: [campaign_id, campaign_name, channel, start_at, budget_usd]
 
-  - name: visitor_session_started
+  # impression / click are NOT event-level rows — kept as monthly aggregates
+  # on Campaign (impressions/clicks/ctr/cpc) and weekly-allocated aggregates
+  # on CampaignWeekly. Deliberate scope reduction: event-level rows would be
+  # a large volume increase for little analytical value beyond the aggregate.
+
+  - name: LP_visit
     entity: Visitor
     type: event
-    attributes:
-      - visitor_id
-      - campaign_id
-      - landing_page
-      - device_type
-      - session_started_at
+    attributes: [visitor_id, campaign_id, lp_url, device_type, first_seen_at]
 
-  - name: visitor_converted_to_signup
+  - name: signup
     entity: Visitor
     type: state_change
-    attributes:
-      - visitor_id
-      - user_id
-      - converted_at
+    attributes: [visitor_id, converted_user_id, signup_at, did_signup]
 
-  # ── Activation ────────────────────────────────────────────────────────────────
+  - name: qualify
+    entity: Visitor
+    type: state_change
+    attributes: [visitor_id, is_qualified, qualified_at]
+
+  # ── Activation ────────────────────────────────────────────────────────────
 
   - name: user_signed_up
     entity: User
     type: create
-    attributes:
-      - user_id
-      - account_id
-      - email
-      - acquisition_channel
-      - signup_at
+    attributes: [user_id, account_id, motion, signup_at]
 
-  - name: account_created
-    entity: Account
-    type: create
-    attributes:
-      - account_id
-      - company_name
-      - industry
-      - icp_segment
-      - created_at
-
-  - name: onboarding_step_completed
+  - name: setup                 # self-serve step 1 / sales-led kickoff_call
     entity: UsageEvent
     type: event
-    attributes:
-      - event_id
-      - user_id
-      - onboarding_step_name
-      - occurred_at
+    attributes: [event_id, user_id, onboarding_step_name, occurred_at]
 
-  - name: user_activated
+  - name: connect_data           # self-serve step 2 / sales-led data_migration
+    entity: UsageEvent
+    type: event
+    attributes: [event_id, user_id, onboarding_step_name, occurred_at]
+
+  - name: first_action           # self-serve step 3 / sales-led admin_permissions_set
+    entity: UsageEvent
+    type: event
+    attributes: [event_id, user_id, onboarding_step_name, occurred_at]
+
+  - name: invite_team            # self-serve step 4 / sales-led team_rollout
+    entity: UsageEvent
+    type: event
+    attributes: [event_id, user_id, onboarding_step_name, occurred_at]
+
+  - name: reach_value            # Value-moment — tracked as User.value_moment_at, not a UsageEvent row
     entity: User
     type: state_change
-    attributes:
-      - user_id
-      - account_id
-      - activated_at
-      - core_actions_completed
+    attributes: [user_id, value_moment_at]
 
   - name: feature_used
     entity: UsageEvent
     type: event
-    attributes:
-      - event_id
-      - user_id
-      - feature_name
-      - is_core_action
-      - occurred_at
+    attributes: [event_id, user_id, feature_name, is_core_action, occurred_at]
 
-  - name: session_started
+  # ── Retention ─────────────────────────────────────────────────────────────
+
+  - name: core_action
     entity: UsageEvent
     type: event
-    attributes:
-      - event_id
-      - user_id
-      - session_id
-      - platform
-      - occurred_at
+    attributes: [event_id, user_id, is_core_action, occurred_at]
 
-  # ── Monetisation ──────────────────────────────────────────────────────────────
-
-  - name: seat_assigned
-    entity: Seat
-    type: create
-    attributes:
-      - seat_id
-      - account_id
-      - user_id
-      - plan_id
-      - seat_mrr
-      - assigned_at
-
-  - name: contract_signed
-    entity: Contract
-    type: create
-    attributes:
-      - contract_id
-      - account_id
-      - plan_id
-      - arr_usd
-      - billing_cycle
-      - start_at
-
-  - name: contract_renewed
-    entity: Contract
-    type: update
-    attributes:
-      - contract_id
-      - account_id
-      - renewed_at
-      - renewal_arr_usd
-      - new_end_at
-
-  - name: plan_upgraded
-    entity: Account
-    type: state_change
-    attributes:
-      - account_id
-      - from_plan_id
-      - to_plan_id
-      - upgraded_at
-
-  - name: plan_downgraded
-    entity: Account
-    type: state_change
-    attributes:
-      - account_id
-      - from_plan_id
-      - to_plan_id
-      - downgraded_at
-
-  # ── Retention ─────────────────────────────────────────────────────────────────
-
-  - name: support_ticket_opened
+  - name: support
     entity: SupportTicket
     type: create
-    attributes:
-      - ticket_id
-      - account_id
-      - user_id
-      - category
-      - priority
-      - opened_at
+    attributes: [ticket_id, account_id, category, severity, opened_at]
 
   - name: support_ticket_resolved
     entity: SupportTicket
     type: update
-    attributes:
-      - ticket_id
-      - resolved_at
-      - resolution_hours
-      - csat_score
+    attributes: [ticket_id, resolved_at, resolution_hours, csat_score]
 
   - name: health_score_computed
     entity: HealthScoreSnapshot
     type: snapshot
-    attributes:
-      - snapshot_id
-      - account_id
-      - week_start
-      - score
-      - health_band
+    attributes: [snapshot_id, account_id, week_start, score, health_band]
 
-  - name: health_score_degraded
-    entity: HealthScoreSnapshot
-    type: alert
-    attributes:
-      - snapshot_id
-      - account_id
-      - previous_score
-      - current_score
-      - week_start
+  - name: QBR
+    entity: QBR
+    type: event
+    attributes: [qbr_id, account_id, csm_id, qbr_date]
 
-  - name: churn_risk_flagged
-    entity: Account
-    type: state_change
-    attributes:
-      - account_id
-      - health_score
-      - flagged_at
-      - risk_reason
-
-  - name: account_churned
-    entity: Account
-    type: state_change
-    attributes:
-      - account_id
-      - churned_at
-      - churn_reason
-      - final_mrr
-
-  - name: seat_churned
-    entity: Seat
-    type: update
-    attributes:
-      - seat_id
-      - account_id
-      - user_id
-      - churned_at
-
-  # ── Expansion ─────────────────────────────────────────────────────────────────
+  # ── Expansion ─────────────────────────────────────────────────────────────
 
   - name: expansion_opportunity_identified
     entity: ExpansionOpportunity
     type: create
-    attributes:
-      - opportunity_id
-      - account_id
-      - opportunity_type
-      - expansion_mrr_potential
-      - identified_at
+    attributes: [opp_id, account_id, trigger_type, expected_mrr_uplift, identified_at]
 
-  - name: expansion_opportunity_progressed
-    entity: ExpansionOpportunity
-    type: update
-    attributes:
-      - opportunity_id
-      - previous_stage
-      - new_stage
-      - updated_at
+  - name: hit_limit
+    entity: ExpansionActivity
+    type: event
+    attributes: [activity_id, opp_id, account_id, occurred_at]
+
+  - name: upsell_convo
+    entity: ExpansionActivity
+    type: event
+    attributes: [activity_id, opp_id, account_id, occurred_at]
+
+  - name: seat_add
+    entity: ExpansionActivity
+    type: event
+    attributes: [activity_id, opp_id, account_id, occurred_at]
+
+  - name: tier_upgrade
+    entity: ExpansionActivity
+    type: event
+    attributes: [activity_id, opp_id, account_id, occurred_at]
+
+  - name: add_on_buy
+    entity: ExpansionActivity
+    type: event
+    attributes: [activity_id, opp_id, account_id, occurred_at]
 
   - name: expansion_opportunity_closed_won
     entity: ExpansionOpportunity
     type: state_change
-    attributes:
-      - opportunity_id
-      - account_id
-      - closed_at
-      - expansion_mrr_realised
+    attributes: [opp_id, account_id, closed_at, expected_mrr_uplift]
 
   - name: expansion_opportunity_closed_lost
     entity: ExpansionOpportunity
     type: state_change
-    attributes:
-      - opportunity_id
-      - account_id
-      - closed_at
-      - lost_reason
+    attributes: [opp_id, account_id, closed_at]
 
-  - name: cohort_snapshot_recorded
-    entity: Cohort
-    type: snapshot
-    attributes:
-      - cohort_id
-      - cohort_period
-      - user_count
-      - activated_count
-      - activation_rate
+  # ── Monetisation ──────────────────────────────────────────────────────────
+
+  - name: contract_signed
+    entity: Contract
+    type: create
+    attributes: [contract_id, account_id, plan_id, arr, billing_cycle, start_at]
+
+  - name: price_change
+    entity: PriceChangeEvent
+    type: create
+    attributes: [price_change_id, plan_tier, old_price_per_seat, new_price_per_seat, effective_at]
+
+  - name: discount_grant
+    entity: DiscountGrant
+    type: create
+    attributes: [grant_id, contract_id, account_id, discount_pct, granted_at]
+
+  - name: add_on_attach
+    entity: AddonAttach
+    type: create
+    attributes: [attach_id, contract_id, account_id, addon_id, addon_mrr, attached_at]
+
+  - name: renewal_pricing
+    entity: MrrMovement       # the `renew` movement type carries the renewal MRR delta
+    type: create
+    attributes: [movement_id, account_id, mrr_delta_usd, occurred_at]

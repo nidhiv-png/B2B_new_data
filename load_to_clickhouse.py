@@ -24,34 +24,64 @@ OUTPUT_PATH = Path(__file__).parent / 'output'
 TABLE_ORDER = [
     'dim_csm',
     'plan',
+    'vendor',
     'campaign',
+    'creative',
     'account',
     'cohort',
+    'cohort_weekly',
     'user',
     'visitor',
     'seat',
     'contract',
+    'discount_grant',
+    'price_change_event',
+    'addon_attach',
     'usage_event',
     'support_ticket',
+    'qbr',
     'expansion_opportunity',
+    'team',
+    'expansion_activity',
     'health_score_snapshot',
+    'mrr_movement',
+    'headcount',
+    'cost_transaction',
+    'revenue_line',
+    'cash',
+    'campaign_weekly',
 ]
 
-# Columns that should be treated as Nullable (empty string → None)
+# Columns that should be treated as Nullable (empty string / NaN → None)
 NULLABLE_COLS = {
     'dim_csm':               ['active_to'],
     'plan':                  ['effective_to'],
+    'vendor':                [],
     'account':               ['csm_owner_id', 'first_paid_at'],
     'cohort':                [],
-    'user':                  ['cohort_id', 'activated_at'],
-    'visitor':               ['converted_user_id'],
+    'cohort_weekly':         [],
+    'user':                  ['cohort_id', 'activated_at', 'value_moment_at'],
+    'visitor':               ['campaign_id', 'creative_id', 'signup_at', 'qualified_at', 'converted_user_id'],
     'seat':                  ['churned_at'],
     'contract':              [],
+    'discount_grant':        [],
+    'price_change_event':    [],
+    'addon_attach':          [],
     'usage_event':           ['onboarding_step_name'],
     'support_ticket':        ['resolved_at', 'resolution_hours', 'csat_score'],
+    'qbr':                   [],
     'expansion_opportunity': ['owner_csm_id', 'closed_at'],
+    'team':                  [],
+    'expansion_activity':    [],
     'health_score_snapshot': [],
+    'mrr_movement':          [],
+    'headcount':             [],
+    'cost_transaction':      [],
+    'revenue_line':          [],
+    'cash':                  [],
     'campaign':              [],
+    'creative':              [],
+    'campaign_weekly':       [],
 }
 
 # Boolean columns stored as 0/1 in ClickHouse
@@ -59,7 +89,7 @@ BOOL_COLS = {
     'plan':    ['is_self_serve', 'ai_addon_available'],
     'account': ['is_self_serve'],
     'user':    ['is_admin'],
-    'visitor': ['did_signup'],
+    'visitor': ['did_signup', 'is_qualified'],
     'seat':    ['is_paid'],
     'usage_event': ['is_core_action'],
 }
@@ -67,17 +97,38 @@ BOOL_COLS = {
 # DateTime columns: must be parsed from string to datetime before insert
 DATETIME_COLS = {
     'campaign':               ['start_at', 'end_at'],
+    'creative':               ['created_at'],
     'account':                ['first_paid_at', 'created_at'],
     'cohort':                 ['cohort_start_date'],
-    'user':                   ['signup_at', 'activated_at', 'last_active_at'],
-    'visitor':                ['first_seen_at', 'last_seen_at'],
+    'user':                   ['signup_at', 'activated_at', 'value_moment_at', 'last_active_at'],
+    'visitor':                ['first_seen_at', 'last_seen_at', 'signup_at', 'qualified_at'],
     'seat':                   ['activated_at', 'churned_at'],
     'contract':               ['start_at', 'end_at', 'renewal_at'],
+    'discount_grant':         ['granted_at'],
+    'price_change_event':     ['effective_at'],
+    'addon_attach':           ['attached_at'],
     'usage_event':            ['occurred_at'],
     'support_ticket':         ['opened_at', 'resolved_at'],
+    'qbr':                    ['qbr_date'],
     'expansion_opportunity':  ['identified_at', 'closed_at'],
+    'team':                   ['created_at'],
+    'expansion_activity':     ['occurred_at'],
     'health_score_snapshot':  ['week_start'],
+    'mrr_movement':           ['occurred_at'],
+    'cost_transaction':       ['occurred_at'],
+    'revenue_line':           ['occurred_at'],
+    'cash':                   ['as_of'],
+    'campaign_weekly':        ['week_start'],
 }
+
+# pandas' default NA-string sniffing treats the literal string "NA" (used here
+# as the region code for North America, per the HTML's own dimension naming)
+# as a null marker. Without this override, every "NA" region would silently
+# turn into a blank/None on the round-trip through read_csv.
+_NA_VALUES_EXCLUDING_LITERAL_NA = [
+    '', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN', '-NaN', '-nan',
+    '1.#IND', '1.#QNAN', '<NA>', 'N/A', 'NULL', 'NaN', 'None', 'n/a', 'nan', 'null',
+]
 
 # ─────────────────────────── Helpers ────────────────────────────────────────
 
@@ -130,7 +181,7 @@ def coerce_df(table: str, df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def load_table(client, table: str, csv_path: Path) -> int:
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, keep_default_na=False, na_values=_NA_VALUES_EXCLUDING_LITERAL_NA)
     df = coerce_df(table, df)
 
     # Truncate existing data before reload

@@ -1,31 +1,84 @@
+# Regenerated from the real schema (simulation.py + schema/clickhouse_ddl.sql).
+# This file documents entities/columns only — no metric formulas. Metrics are
+# computed downstream by querying this raw data (see plan.md §0 ground rule).
+# Grouped by altitude/workflow per vedha_tessera_model_v2.html.
+
 entities:
 
-  DimCSM:
-    id: csm_id
-    type: dimension
+  # ── Financial ────────────────────────────────────────────────────────────
+
+  RevenueLine:
+    id: revenue_line_id
+    type: pnl
+    scope: monthly
+    attributes:
+      - revenue_type       # Subscription | Services
+      - amount_usd
+      - occurred_at
+      - time_period
+
+  Cash:
+    id: cash_id
+    type: pnl
+    scope: monthly_state
+    attributes:
+      - time_period
+      - as_of
+      - opening_cash_usd
+      - net_change_usd
+      - cash_balance_usd
+
+  # ── Company ───────────────────────────────────────────────────────────────
+
+  MrrMovement:
+    id: movement_id
+    type: revenue_engine
+    scope: event
+    attributes:
+      - account_id
+      - movement_type      # new | reactivate | expand | contract | churn | renew
+      - mrr_delta_usd
+      - seats_delta
+      - space              # which functional workflow drove the movement
+      - motion
+      - segment
+      - plan_tier
+      - occurred_at
+      - time_period
+
+  Vendor:
+    id: vendor_id
+    type: cost_burn
     scope: static
     attributes:
-      - csm_name
-      - csm_email
-      - team
-      - capacity_accounts
-      - segment_focus
-      - active_from
-      - active_to
+      - vendor_name
+      - cost_line          # Cloud & infra | AI inference | Other
 
-  Plan:
-    id: plan_id
-    type: dimension
-    scope: scd2
+  Headcount:
+    id: headcount_id
+    type: cost_burn
+    scope: monthly
     attributes:
-      - plan_name
-      - tier
-      - price_per_seat_monthly
-      - max_seats
-      - total_features_count
-      - is_self_serve
-      - effective_from
-      - effective_to
+      - function           # R&D | S&M | G&A | CS
+      - headcount_count
+      - avg_monthly_salary_usd
+      - people_cost_usd
+      - time_period
+
+  CostTransaction:
+    id: cost_id
+    type: cost_burn
+    scope: monthly
+    attributes:
+      - vendor_id
+      - vendor_name
+      - cost_line
+      - function
+      - amount_usd
+      - occurred_at
+      - time_period
+
+  # ── Functional: Acquisition ────────────────────────────────────────────────
 
   Campaign:
     id: campaign_id
@@ -33,54 +86,144 @@ entities:
     scope: monthly
     attributes:
       - campaign_name
-      - channel
-      - geo
+      - channel            # Paid | Organic | Direct (Referral excluded — not campaign-driven)
+      - geo_target
       - icp_segment_target
       - industry_target
-      - start_date
-      - end_date
+      - start_at
+      - end_at
       - budget_usd
       - impressions
       - clicks
       - conversions
-      - spend_usd
-      - cpm
+      - spend
+      - cpc
       - ctr
       - time_period
+
+  CampaignWeekly:
+    id: campaign_id            # composite with week_start
+    type: acquisition
+    scope: weekly
+    attributes:
+      - week_start
+      - channel
+      - impressions
+      - clicks
+      - conversions
+      - spend
+      - time_period
+
+  Creative:
+    id: creative_id
+    type: acquisition
+    scope: static
+    attributes:
+      - campaign_id
+      - creative_name
+      - format
+      - created_at
+      - time_period
+
+  Visitor:
+    id: visitor_id
+    type: acquisition
+    scope: pre_signup
+    attributes:
+      - campaign_id          # nullable — null for Referral-channel visitors
+      - creative_id          # nullable
+      - anonymous_id
+      - channel              # Paid | Organic | Referral | Direct
+      - source
+      - medium
+      - geo
+      - lp_url
+      - device_type
+      - page_views
+      - session_count
+      - first_seen_at
+      - last_seen_at
+      - did_signup
+      - signup_at            # nullable — the HTML's `Signup`, now a real timestamp not just a flag
+      - is_qualified         # the HTML's `qualify` step
+      - qualified_at
+      - converted_user_id
+      - est_account_size_band
+      - est_industry
+      - time_period
+
+  # ── Functional: Activation ─────────────────────────────────────────────────
+
+  Cohort:
+    id: cohort_id
+    type: activation
+    scope: monthly
+    attributes:
+      - cohort_period
+      - cohort_start_date
+      - cohort_grain          # 'monthly'
+      - channel_origin
+      - plan_at_signup
+      - segment
+      - activation_rate
+      - time_period
+      - user_count
+      - activated_count
+
+  CohortWeekly:
+    id: cohort_id
+    type: activation
+    scope: weekly
+    attributes:
+      - cohort_period
+      - cohort_grain          # 'weekly'
+      - channel_origin
+      - user_count
+      - activated_count
+      - activation_rate
+      - time_period
+
+  UsageEvent:
+    id: event_id
+    type: activation
+    scope: event
+    attributes:
+      - user_id
+      - account_id
+      - event_name
+      - feature_name
+      - is_core_action
+      - onboarding_step_name   # forked by motion — see ONBOARDING_STEPS_SELF_SERVE / _SALES_LED in config.py
+      - session_id
+      - platform
+      - occurred_at
+      - time_period
+
+  # ── Core (shared across workflows) ──────────────────────────────────────
 
   Account:
     id: account_id
     type: core
     scope: lifecycle
     attributes:
-      - company_name
-      - industry
+      - account_name
+      - industry             # SaaS/Tech | Financial svcs | Healthcare | Retail | Other
       - employee_count
       - annual_revenue_usd
-      - country
-      - region
-      - icp_segment
+      - geo
+      - region               # NA | EMEA | APAC | LATAM
+      - segment              # SMB | Mid-market | Enterprise
+      - motion                # Self-serve | Sales-led
+      - account_size_band     # <10 | 10-50 | 50-200 | 200+ (from Contract.seat_count)
       - lifecycle_state
       - current_plan_id
       - csm_owner_id
       - am_owner_id
       - is_self_serve
       - acquisition_channel
+      - willingness_to_pay_usd_per_seat   # synthetic WTP input (plan.md §3.4)
       - first_paid_at
       - created_at
-      - time_period
-
-  Cohort:
-    id: cohort_id
-    type: dimension
-    scope: monthly
-    attributes:
-      - cohort_period
-      - cohort_start_date
-      - channel_origin
-      - user_count
-      - activated_count
-      - activation_rate
       - time_period
 
   User:
@@ -95,31 +238,57 @@ entities:
       - role
       - department
       - is_admin
-      - lifecycle_state
+      - lifecycle_state       # includes Core / Power tiers
+      - channel_origin
+      - motion
+      - iq_segment
       - signup_at
       - activated_at
-      - last_seen_at
+      - value_moment_at       # the HTML's `Value-moment` entity
+      - last_active_at
       - time_period
 
-  Visitor:
-    id: visitor_id
-    type: acquisition
-    scope: pre_signup
+  DimCSM:
+    id: csm_id
+    type: dimension
+    scope: static
     attributes:
-      - campaign_id
-      - anonymous_id
-      - first_seen_at
-      - last_seen_at
-      - landing_page
-      - referrer_url
-      - geo_country
-      - device_type
-      - page_views
-      - session_count
-      - did_signup
-      - user_id
-      - est_account_size_band
-      - est_industry
+      - csm_name
+      - csm_email
+      - team
+      - capacity_accounts
+      - segment_focus
+      - active_from
+      - active_to
+
+  # ── Functional: Monetisation ────────────────────────────────────────────
+
+  Plan:
+    id: plan_id
+    type: monetisation
+    scope: scd2
+    attributes:
+      - plan_name
+      - tier
+      - list_price_per_seat    # the "Price book" — kept folded into Plan, not a separate entity
+      - billing_period
+      - seat_limit
+      - total_features_count
+      - ai_addon_available
+      - is_self_serve
+      - effective_from
+      - effective_to
+      - time_period
+
+  PriceChangeEvent:
+    id: price_change_id
+    type: monetisation
+    scope: event
+    attributes:
+      - plan_tier
+      - old_price_per_seat
+      - new_price_per_seat
+      - effective_at
       - time_period
 
   Seat:
@@ -130,11 +299,11 @@ entities:
       - account_id
       - user_id
       - plan_id
-      - seat_type
+      - seat_status
       - seat_mrr
       - billing_cycle
       - is_paid
-      - assigned_at
+      - activated_at
       - churned_at
       - time_period
 
@@ -146,31 +315,47 @@ entities:
       - account_id
       - plan_id
       - status
-      - total_seats
-      - arr_usd
-      - mrr_usd
+      - seat_count
+      - mrr
+      - arr
       - billing_cycle
       - start_at
       - end_at
-      - renewal_date
+      - renewal_at
       - discount_pct
+      - realized_price_per_seat
+      - addon_mrr
+      - deal_size_band        # <$5k | $5-25k | $25-100k | $100k+ (from arr)
       - time_period
+      - seats_used
+      - seat_utilisation_pct
+      - utilisation_band      # <50% | 50-80% | 80-100% | at limit
 
-  UsageEvent:
-    id: event_id
-    type: activation
+  DiscountGrant:
+    id: grant_id
+    type: monetisation
     scope: event
     attributes:
-      - user_id
+      - contract_id
       - account_id
-      - event_name
-      - feature_name
-      - is_core_action
-      - onboarding_step_name
-      - session_id
-      - platform
-      - occurred_at
+      - discount_pct
+      - granted_at
       - time_period
+
+  AddonAttach:
+    id: attach_id
+    type: monetisation
+    scope: event
+    attributes:
+      - contract_id
+      - account_id
+      - addon_id
+      - addon_name
+      - addon_mrr
+      - attached_at
+      - time_period
+
+  # ── Functional: Retention ───────────────────────────────────────────────
 
   SupportTicket:
     id: ticket_id
@@ -181,7 +366,7 @@ entities:
       - user_id
       - subject
       - category
-      - priority
+      - severity
       - status
       - channel
       - opened_at
@@ -190,23 +375,14 @@ entities:
       - csat_score
       - time_period
 
-  ExpansionOpportunity:
-    id: opportunity_id
-    type: expansion
-    scope: per_account
+  QBR:
+    id: qbr_id
+    type: retention
+    scope: quarterly
     attributes:
       - account_id
-      - owner_csm_id
-      - opportunity_type
-      - stage
-      - expansion_mrr_potential
-      - current_seats
-      - proposed_seats
-      - current_plan_id
-      - proposed_plan_id
-      - identified_at
-      - closed_at
-      - outcome
+      - csm_id
+      - qbr_date
       - time_period
 
   HealthScoreSnapshot:
@@ -221,6 +397,50 @@ entities:
       - core_actions_per_user
       - feature_breadth
       - support_tickets_open
-      - health_band
+      - health_band            # Green | Yellow | Red
       - plan_tier
+      - time_period
+
+  # ── Functional: Expansion ───────────────────────────────────────────────
+
+  ExpansionOpportunity:
+    id: opp_id
+    type: expansion
+    scope: per_account
+    attributes:
+      - account_id
+      - owner_csm_id
+      - trigger_type
+      - motion_type            # Self-serve | Sales-led
+      - upsell_status
+      - expected_mrr_uplift
+      - seats_eligible
+      - current_seats
+      - proposed_seats
+      - current_plan_id
+      - proposed_plan_id
+      - identified_at
+      - closed_at
+      - outcome
+      - time_period
+
+  Team:
+    id: team_id
+    type: expansion
+    scope: static
+    attributes:
+      - account_id
+      - team_name
+      - created_at
+      - time_period
+
+  ExpansionActivity:
+    id: activity_id
+    type: expansion
+    scope: event
+    attributes:
+      - opp_id
+      - account_id
+      - activity_type          # hit_limit | upsell_convo | seat_add | tier_upgrade | add_on_buy
+      - occurred_at
       - time_period

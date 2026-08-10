@@ -1,6 +1,6 @@
 """
 Tessera B2B SaaS — Data Simulation
-Generates 13 CSV files (Jan 2025 – Aug 2026) and saves them to ./output/
+Generates CSV files (Jan 2025 - Sep 2026) and saves them to ./output/
 """
 
 import uuid
@@ -20,19 +20,34 @@ from config import (
     TOTAL_ACCOUNTS, TARGET_USERS,
     PLAN_MASTER, PLAN_CURRENT,
     DIM_CSM_MASTER, CSM_BY_SEGMENT,
-    CHANNELS, CHANNEL_WEIGHTS,
+    CHANNELS, CHANNEL_WEIGHTS, CAMPAIGN_CHANNELS, CAMPAIGN_CHANNEL_WEIGHTS, CHANNEL_UTM,
+    MOTION_TYPES,
     GEOS, GEO_WEIGHTS,
     INDUSTRIES, INDUSTRY_WEIGHTS,
     ICP_SEGMENTS, ICP_WEIGHTS,
     ICP_EMPLOYEE_RANGE, ICP_REVENUE_RANGE,
     SEGMENT_PLAN_DISTRIBUTION, LIFECYCLE_STATE_WEIGHTS,
     USERS_PER_ACCOUNT,
+    ACCOUNT_SIZE_BAND_EDGES, ACCOUNT_SIZE_BANDS,
+    DEAL_SIZE_BAND_EDGES, DEAL_SIZE_BANDS,
+    UTILISATION_BAND_EDGES, UTILISATION_BANDS,
     USAGE_EVENT_TYPES, EVENT_NAMES, EVENT_WEIGHTS,
-    ONBOARDING_STEPS, EVENTS_PER_MONTH, USER_LIFECYCLE_TO_EVENT_BUCKET,
+    ONBOARDING_STEPS_SELF_SERVE, ONBOARDING_STEPS_SALES_LED,
+    EVENTS_PER_MONTH, USER_LIFECYCLE_TO_EVENT_BUCKET,
+    QUALIFY_RATE,
     TICKET_CATEGORIES, TICKET_PRIORITIES, TICKET_PRIORITY_WEIGHTS,
     TICKET_CHANNELS, TICKET_CHANNEL_WEIGHTS, RESOLUTION_HOURS_BY_PRIORITY,
+    QBR_ELIGIBLE_TIERS,
     EXPANSION_TYPES, EXPANSION_STAGES, EXPANSION_MOTION_TYPES, EXPANSION_MOTION_WEIGHTS,
     BILLING_CYCLES, BILLING_CYCLE_WEIGHTS, DISCOUNT_BY_SEGMENT,
+    ADDON_CATALOG,
+    ELASTICITY_BY_SEGMENT, WTP_MEAN_MULTIPLIER_BY_SEGMENT, WTP_NOISE_STD,
+    COST_LINES, FUNCTIONS, VENDOR_MASTER,
+    HEADCOUNT_START, HEADCOUNT_MONTHLY_GROWTH, AVG_MONTHLY_SALARY_USD_BY_FUNCTION,
+    CLOUD_COST_PER_ACCOUNT_USD, CLOUD_COST_BASE_FIXED_USD,
+    AI_INFERENCE_COST_PER_ACCOUNT_USD_START, AI_INFERENCE_MONTHLY_RAMP,
+    OTHER_COST_BASE_FIXED_USD, OTHER_COST_PCT_OF_MRR,
+    SERVICES_REVENUE_PCT_OF_MRR, OPENING_CASH_USD,
     LANDING_PAGES, DEVICE_TYPES, DEVICE_WEIGHTS,
     ACCOUNT_MONTHLY_WEIGHTS, AM_OWNERS,
     USER_ROLES, USER_DEPARTMENTS,
@@ -46,21 +61,18 @@ BASE_PATH   = Path(__file__).parent
 OUTPUT_PATH = BASE_PATH / "output"
 OUTPUT_PATH.mkdir(exist_ok=True)
 
-MONTH_RANGE = pd.date_range('2025-01-01', '2026-08-01', freq='MS')   # 20 months
+MONTH_RANGE = pd.date_range('2025-01-01', '2026-09-01', freq='MS')   # 21 months
 
-# UTM channel → (source, medium) mapping
-CHANNEL_UTM = {
-    'paid_search':  ('google',    'cpc'),
-    'content_seo':  ('google',    'organic'),
-    'direct':       ('direct',    'none'),
-    'product_led':  ('tessera',   'product'),
-    'field_sales':  ('outbound',  'email'),
-}
+SEAT_RANGES_BY_SEGMENT = {'SMB': (2, 10), 'Mid-market': (5, 50), 'Enterprise': (20, 260)}
 
-# Account size band by ICP segment (consistent with visitor est_account_size_band)
-SEGMENT_SIZE_BAND = {'SMB': 'small', 'Mid-Market': 'medium', 'Enterprise': 'large'}
-
-ONBOARDING_PATHS = ['standard', 'guided', 'self_serve']
+# Elasticity is wired into tier-selection demand around each real price change,
+# so ELASTICITY_BY_SEGMENT actually drives generated volume, not just sits in
+# config unused. Demand dips for a few months after a price increase, sized
+# by the average segment elasticity — a simplification (elasticity is
+# segment-specific in reality; tier selection isn't segment-scoped here).
+_PRICE_CHANGE_MONTH = {'Plus': pd.Timestamp('2025-07-01'), 'Business': pd.Timestamp('2025-10-01')}
+_PRICE_CHANGE_PCT   = {'Plus': (15.0 - 12.0) / 12.0, 'Business': (40.0 - 35.0) / 35.0}
+_AVG_ELASTICITY = sum(ELASTICITY_BY_SEGMENT.values()) / len(ELASTICITY_BY_SEGMENT)
 
 
 # ─────────────────────────── Helpers ────────────────────────────────────────
@@ -81,7 +93,7 @@ def rand_dt(start: datetime, end: datetime) -> datetime:
     return start + timedelta(seconds=random.randint(0, delta))
 
 def rand_business_dt(start: datetime, end: datetime) -> datetime:
-    """Random datetime, biased toward business hours (08:00–20:00)."""
+    """Random datetime, biased toward business hours (08:00-20:00)."""
     dt = rand_dt(start, end)
     return dt.replace(hour=random.randint(8, 20), minute=random.randint(0, 59), second=random.randint(0, 59))
 
@@ -113,10 +125,43 @@ def weighted_choice(options, weights):
     return random.choices(options, weights=weights, k=1)[0]
 
 
+def band_from_edges(value, edges, labels):
+    """Which band `value` falls into, given ascending edges and one more label than edges."""
+    for i, e in enumerate(edges):
+        if value < e:
+            return labels[i]
+    return labels[-1]
+
+
+def plan_id_for_tier_at(tier, at_date):
+    """The plan version actually effective on `at_date` for `tier` (SCD-2 aware),
+    so contracts reflect the real price in force at signup, not always the latest."""
+    candidates = [p for p in PLAN_MASTER if p['tier'] == tier]
+    at_ts = pd.to_datetime(at_date)
+    for p in candidates:
+        eff_from = pd.to_datetime(p['effective_from'])
+        eff_to = pd.to_datetime(p['effective_to']) if p['effective_to'] else pd.Timestamp(SIM_END)
+        if eff_from <= at_ts <= eff_to:
+            return p['plan_id']
+    return PLAN_CURRENT.get(tier)
+
+
+def tier_demand_multiplier(tier, month_dt):
+    """Demand dip for ~3 months after a real price increase, sized by elasticity."""
+    if tier not in _PRICE_CHANGE_MONTH:
+        return 1.0
+    change_month = _PRICE_CHANGE_MONTH[tier]
+    months_since = (month_dt.year - change_month.year) * 12 + (month_dt.month - change_month.month)
+    if 0 <= months_since < 3:
+        demand_change_pct = _AVG_ELASTICITY * _PRICE_CHANGE_PCT[tier]
+        return max(0.5, 1 + demand_change_pct)
+    return 1.0
+
+
 # ─────────────────────────── 1. DimCSM ──────────────────────────────────────
 
 def generate_dim_csm():
-    """Monthly snapshot: one row per CSM per active month (Jan 2025 – Aug 2026)."""
+    """Monthly snapshot: one row per CSM per active month."""
     rows = []
     for csm in DIM_CSM_MASTER:
         active_from = pd.to_datetime(csm['active_from']).replace(day=1)
@@ -139,7 +184,7 @@ def generate_dim_csm():
 def generate_plan():
     """Monthly snapshot: one row per plan version per month it was active."""
     rows = []
-    sim_end_month = pd.Timestamp('2026-08-01')
+    sim_end_month = pd.Timestamp('2026-09-01')
 
     for p in PLAN_MASTER:
         eff_from = pd.to_datetime(p['effective_from']).replace(day=1)
@@ -159,13 +204,16 @@ def generate_plan():
 # ─────────────────────────── 3. Campaign ────────────────────────────────────
 
 def generate_campaign():
+    """Only real ad/content efforts get a Campaign row — Referral traffic is
+    word-of-mouth, not campaign-driven, so it draws from CAMPAIGN_CHANNELS
+    (Paid/Organic/Direct), not the full CHANNELS list."""
     rows = []
     cid = 1
     for month_dt in MONTH_RANGE:
         month_s = month_dt.to_pydatetime()
         month_e = month_end(month_s)
         for _ in range(4):
-            channel  = weighted_choice(CHANNELS, CHANNEL_WEIGHTS)
+            channel  = weighted_choice(CAMPAIGN_CHANNELS, CAMPAIGN_CHANNEL_WEIGHTS)
             geo      = weighted_choice(GEOS, GEO_WEIGHTS)
             industry = weighted_choice(INDUSTRIES, INDUSTRY_WEIGHTS)
             icp_seg  = weighted_choice(ICP_SEGMENTS, ICP_WEIGHTS)
@@ -185,7 +233,7 @@ def generate_campaign():
 
             rows.append({
                 'campaign_id':         f'CAM-{cid:04d}',
-                'campaign_name':       f'{channel.replace("_"," ").title()} {industry} {month_s.strftime("%b%Y")}',
+                'campaign_name':       f'{channel} {industry} {month_s.strftime("%b%Y")}',
                 'channel':             channel,
                 'geo_target':          geo['country'],
                 'icp_segment_target':  icp_seg,
@@ -205,9 +253,33 @@ def generate_campaign():
     return pd.DataFrame(rows)
 
 
+# ─────────────────────────── 3b. Creative ───────────────────────────────────
+
+def generate_creative(campaign_df):
+    """A creative/ad-variant catalog per campaign — the HTML's `Creative` entity."""
+    rows = []
+    formats = ['image', 'video', 'text']
+    cid = 1
+    for _, camp in campaign_df.iterrows():
+        n_creatives = random.randint(2, 3)
+        for i in range(n_creatives):
+            rows.append({
+                'creative_id':   f'CRV-{cid:05d}',
+                'campaign_id':   camp['campaign_id'],
+                'creative_name': f"{camp['channel']} creative {i + 1}",
+                'format':        random.choice(formats),
+                'created_at':    camp['start_at'],
+                'time_period':   camp['time_period'],
+            })
+            cid += 1
+    return pd.DataFrame(rows)
+
+
 # ─────────────────────────── 4. Account ─────────────────────────────────────
 
 def generate_account(plan_df, csm_df):
+    price_map = {row['plan_id']: row['list_price_per_seat'] for _, row in plan_df.iterrows()}
+
     rows = []
     company_names_used = set()
 
@@ -223,19 +295,27 @@ def generate_account(plan_df, csm_df):
             geo      = weighted_choice(GEOS, GEO_WEIGHTS)
             channel  = weighted_choice(CHANNELS, CHANNEL_WEIGHTS)
 
-            tier_options   = list(SEGMENT_PLAN_DISTRIBUTION[icp_seg].keys())
-            tier_wts       = list(SEGMENT_PLAN_DISTRIBUTION[icp_seg].values())
-            tier           = weighted_choice(tier_options, tier_wts)
-            current_plan_id = PLAN_CURRENT[tier]
+            created_at = rand_business_dt(month_s, month_e)
+
+            tier_options = list(SEGMENT_PLAN_DISTRIBUTION[icp_seg].keys())
+            base_wts     = list(SEGMENT_PLAN_DISTRIBUTION[icp_seg].values())
+            adj_wts      = [w * tier_demand_multiplier(t, month_dt) for t, w in zip(tier_options, base_wts)]
+            tier         = weighted_choice(tier_options, adj_wts)
+            current_plan_id = plan_id_for_tier_at(tier, created_at)
 
             is_self_serve = tier in ('Free', 'Plus')
+            motion        = 'Self-serve' if is_self_serve else 'Sales-led'
             is_paid       = tier != 'Free'
 
             emp_lo, emp_hi = ICP_EMPLOYEE_RANGE[icp_seg]
             rev_lo, rev_hi = ICP_REVENUE_RANGE[icp_seg]
             employee_count = random.randint(emp_lo, emp_hi)
             annual_revenue = random.randint(rev_lo, rev_hi)
-            account_size_band = SEGMENT_SIZE_BAND[icp_seg]
+
+            wtp_mult  = WTP_MEAN_MULTIPLIER_BY_SEGMENT.get(icp_seg, 1.2)
+            wtp_noise = max(0.5, random.gauss(1.0, WTP_NOISE_STD))
+            list_price = price_map.get(current_plan_id, 35.0)
+            wtp_usd_per_seat = round(list_price * wtp_mult * wtp_noise, 2)
 
             csm_id = None
             if not is_self_serve:
@@ -246,7 +326,6 @@ def generate_account(plan_df, csm_df):
             lifecycle_wts     = list(LIFECYCLE_STATE_WEIGHTS.values())
             lifecycle_state   = weighted_choice(lifecycle_options, lifecycle_wts)
 
-            created_at  = rand_business_dt(month_s, month_e)
             first_paid_at = (
                 rand_business_dt(created_at, created_at + timedelta(days=14))
                 if is_paid else None
@@ -274,13 +353,15 @@ def generate_account(plan_df, csm_df):
                 'geo':                geo['country'],
                 'region':             geo['region'],
                 'segment':            icp_seg,
-                'account_size_band':  account_size_band,
+                'motion':             motion,
+                'account_size_band':  None,   # filled in post-seat-generation, see update_account_size_band()
                 'lifecycle_state':    lifecycle_state,
                 'current_plan_id':    current_plan_id,
                 'csm_owner_id':       csm_id,
                 'am_owner_id':        random.choice(AM_OWNERS),
                 'is_self_serve':      is_self_serve,
                 'acquisition_channel': channel,
+                'willingness_to_pay_usd_per_seat': wtp_usd_per_seat,
                 'first_paid_at':      fmt(first_paid_at),
                 'created_at':         fmt(created_at),
                 'time_period':        month_s.strftime('%Y-%m'),
@@ -293,7 +374,24 @@ def generate_account(plan_df, csm_df):
     return pd.DataFrame(rows)
 
 
-# ─────────────────────────── 5. Cohort ──────────────────────────────────────
+def update_account_size_band(account_df, contract_df):
+    """Real seat-count-derived band, decoupled from segment (was a 1:1 relabel
+    before). Uses Contract.seat_count (purchased capacity, SMB 2-10 / Mid-market
+    5-50 / Enterprise 20-200) rather than actual assigned-user Seat rows —
+    the latter tops out around 15 under USERS_PER_ACCOUNT, so it could never
+    reach the HTML's 50-200/200+ bands at all."""
+    account_df = account_df.copy()
+    seat_counts = contract_df.groupby('account_id')['seat_count'].max().rename('_seat_count').reset_index()
+    account_df = account_df.merge(seat_counts, on='account_id', how='left')
+    account_df['_seat_count'] = account_df['_seat_count'].fillna(0).astype(int)
+    account_df['account_size_band'] = account_df['_seat_count'].apply(
+        lambda n: band_from_edges(n, ACCOUNT_SIZE_BAND_EDGES, ACCOUNT_SIZE_BANDS)
+    )
+    account_df.drop(columns=['_seat_count'], inplace=True)
+    return account_df
+
+
+# ─────────────────────────── 5. Cohort (monthly) ────────────────────────────
 
 def generate_cohort():
     rows = []
@@ -317,6 +415,30 @@ def generate_cohort():
     return pd.DataFrame(rows)
 
 
+def generate_cohort_weekly(user_df):
+    """Parallel weekly grain — the Functional altitude's clock is weekly, and
+    monthly-only cohorts couldn't be sliced that way before this."""
+    u = user_df.copy()
+    u['signup_at_dt'] = pd.to_datetime(u['signup_at'])
+    u['week_start'] = (u['signup_at_dt'] - pd.to_timedelta(u['signup_at_dt'].dt.dayofweek, unit='D')).dt.floor('D')
+
+    rows = []
+    for (week_start, channel), grp in u.groupby(['week_start', 'channel_origin']):
+        total = len(grp)
+        activated = int(grp['activated_at'].notna().sum())
+        rows.append({
+            'cohort_id':       f'COHW-{week_start.strftime("%Y-%m-%d")}-{channel[:3].upper()}',
+            'cohort_period':   week_start.strftime('%Y-%m-%d'),
+            'cohort_grain':    'weekly',
+            'channel_origin':  channel,
+            'user_count':      total,
+            'activated_count': activated,
+            'activation_rate': round(activated / total, 4) if total > 0 else 0.0,
+            'time_period':     week_start.strftime('%Y-%m'),
+        })
+    return pd.DataFrame(rows)
+
+
 # ─────────────────────────── 6. User ────────────────────────────────────────
 
 def generate_user(account_df, cohort_df):
@@ -332,6 +454,7 @@ def generate_user(account_df, cohort_df):
         acc_churn   = parse_dt(acc['_churned_at'])
         channel     = acc['acquisition_channel']
         lifecycle   = acc['lifecycle_state']
+        motion      = acc['motion']
 
         lo, hi = USERS_PER_ACCOUNT.get(icp_seg, (2, 6))
         n_users = random.randint(lo, hi)
@@ -342,7 +465,7 @@ def generate_user(account_df, cohort_df):
 
             cohort_period = signup_at.strftime('%Y-%m')
             cohort_id     = cohort_lookup.get((cohort_period, channel),
-                                              cohort_lookup.get((cohort_period, 'direct'), None))
+                                              cohort_lookup.get((cohort_period, 'Direct'), None))
 
             activated_at = None
             user_lifecycle = lifecycle
@@ -351,6 +474,12 @@ def generate_user(account_df, cohort_df):
                 activated_at = signup_at + timedelta(days=days_to_activate)
                 if activated_at > SIM_END:
                     activated_at = None
+
+            value_moment_at = None
+            if activated_at is not None:
+                vm = activated_at + timedelta(days=random.randint(0, 5))
+                if vm <= SIM_END:
+                    value_moment_at = vm
 
             if acc_churn:
                 last_active = acc_churn - timedelta(hours=random.randint(1, 72))
@@ -376,10 +505,11 @@ def generate_user(account_df, cohort_df):
                 'is_admin':         is_admin,
                 'lifecycle_state':  user_lifecycle,
                 'channel_origin':   channel,
-                'onboarding_path':  random.choice(ONBOARDING_PATHS),
+                'motion':           motion,
                 'iq_segment':       icp_seg,
                 'signup_at':        fmt(signup_at),
                 'activated_at':     fmt(activated_at),
+                'value_moment_at':  fmt(value_moment_at),
                 'last_active_at':   fmt(last_active),
                 'time_period':      signup_at.strftime('%Y-%m'),
                 '_churned_at':      fmt(acc_churn),
@@ -434,9 +564,9 @@ def update_cohort(cohort_df, user_df, account_df):
 
 # ─────────────────────────── 7. Visitor ─────────────────────────────────────
 
-def generate_visitor(campaign_df, user_df):
+def generate_visitor(campaign_df, user_df, creative_df):
     rows = []
-    est_size_map = {'SMB': 'small', 'Mid-Market': 'medium', 'Enterprise': 'large'}
+    creative_by_campaign = creative_df.groupby('campaign_id')['creative_id'].apply(list).to_dict()
 
     paid_users = user_df[user_df['lifecycle_state'] != 'Churned'].sample(
         frac=0.65, random_state=42
@@ -446,23 +576,39 @@ def generate_visitor(campaign_df, user_df):
     for _, usr in paid_users.iterrows():
         signup_at  = pd.to_datetime(usr['signup_at'])
         usr_period = usr['time_period']
+        channel    = usr['channel_origin']
 
-        same_month = campaign_df[campaign_df['time_period'] == usr_period]
-        if len(same_month) == 0:
-            same_month = campaign_df
+        campaign_id  = None
+        creative_id  = None
+        est_industry = None
 
-        camp = same_month.sample(1, random_state=None).iloc[0]
+        if channel != 'Referral':
+            same_month = campaign_df[(campaign_df['time_period'] == usr_period) & (campaign_df['channel'] == channel)]
+            if len(same_month) == 0:
+                same_month = campaign_df[campaign_df['channel'] == channel]
+            if len(same_month) == 0:
+                same_month = campaign_df
+
+            camp = same_month.sample(1, random_state=None).iloc[0]
+            campaign_id = camp['campaign_id']
+            est_industry = camp['industry_target']
+            cids = creative_by_campaign.get(campaign_id, [])
+            creative_id = random.choice(cids) if cids else None
 
         first_seen = max(signup_at - timedelta(days=random.randint(1, 14)), SIM_START)
         last_seen  = max(signup_at - timedelta(hours=random.randint(1, 12)), SIM_START)
 
-        utm_source, utm_medium = CHANNEL_UTM.get(camp['channel'], ('other', 'other'))
+        utm_source, utm_medium = CHANNEL_UTM.get(channel, ('other', 'other'))
+
+        is_qualified = random.random() < QUALIFY_RATE
+        qualified_at = fmt(signup_at + timedelta(days=random.randint(1, 5))) if is_qualified else None
 
         rows.append({
             'visitor_id':            uid(),
-            'campaign_id':           camp['campaign_id'],
+            'campaign_id':           campaign_id,
+            'creative_id':           creative_id,
             'anonymous_id':          uid(),
-            'channel':               camp['channel'],
+            'channel':               channel,
             'source':                utm_source,
             'medium':                utm_medium,
             'geo':                   weighted_choice(GEOS, GEO_WEIGHTS)['country'],
@@ -473,13 +619,16 @@ def generate_visitor(campaign_df, user_df):
             'first_seen_at':         fmt(first_seen),
             'last_seen_at':          fmt(last_seen),
             'did_signup':            True,
+            'signup_at':             fmt(signup_at),
+            'is_qualified':          is_qualified,
+            'qualified_at':          qualified_at,
             'converted_user_id':     usr['user_id'],
-            'est_account_size_band': est_size_map.get(camp['icp_segment_target'], 'small'),
-            'est_industry':          camp['industry_target'],
+            'est_account_size_band': weighted_choice(ACCOUNT_SIZE_BANDS, [0.40, 0.35, 0.20, 0.05]),
+            'est_industry':          est_industry if est_industry else weighted_choice(INDUSTRIES, INDUSTRY_WEIGHTS),
             'time_period':           first_seen.strftime('%Y-%m'),
         })
 
-    # Non-converting visitors (~3× converting)
+    # Non-converting visitors (~3x converting), tied to real campaigns only
     n_non_convert = len(rows) * 3
     for _ in range(n_non_convert):
         camp = campaign_df.sample(1, random_state=None).iloc[0]
@@ -491,10 +640,13 @@ def generate_visitor(campaign_df, user_df):
         last_seen  = first_seen + timedelta(hours=random.randint(1, 48))
 
         utm_source, utm_medium = CHANNEL_UTM.get(camp['channel'], ('other', 'other'))
+        cids = creative_by_campaign.get(camp['campaign_id'], [])
+        creative_id = random.choice(cids) if cids else None
 
         rows.append({
             'visitor_id':            uid(),
             'campaign_id':           camp['campaign_id'],
+            'creative_id':           creative_id,
             'anonymous_id':          uid(),
             'channel':               camp['channel'],
             'source':                utm_source,
@@ -507,8 +659,11 @@ def generate_visitor(campaign_df, user_df):
             'first_seen_at':         fmt(first_seen),
             'last_seen_at':          fmt(last_seen),
             'did_signup':            False,
+            'signup_at':             None,
+            'is_qualified':          False,
+            'qualified_at':          None,
             'converted_user_id':     None,
-            'est_account_size_band': est_size_map.get(camp['icp_segment_target'], 'small'),
+            'est_account_size_band': weighted_choice(ACCOUNT_SIZE_BANDS, [0.40, 0.35, 0.20, 0.05]),
             'est_industry':          camp['industry_target'],
             'time_period':           first_seen.strftime('%Y-%m'),
         })
@@ -555,7 +710,6 @@ def generate_seat(account_df, user_df, plan_df):
 
 def generate_contract(account_df, plan_df):
     price_map    = {row['plan_id']: row['list_price_per_seat'] for _, row in plan_df.iterrows()}
-    max_seat_map = {row['plan_id']: row['seat_limit']          for _, row in plan_df.iterrows()}
 
     paid_accounts = account_df[account_df['_is_paid'] == True].copy()
 
@@ -570,8 +724,7 @@ def generate_contract(account_df, plan_df):
 
         billing = weighted_choice(BILLING_CYCLES, BILLING_CYCLE_WEIGHTS)
 
-        seat_ranges = {'SMB': (2, 10), 'Mid-Market': (5, 50), 'Enterprise': (20, 200)}
-        s_lo, s_hi  = seat_ranges.get(icp_seg, (2, 10))
+        s_lo, s_hi  = SEAT_RANGES_BY_SEGMENT.get(icp_seg, (2, 10))
         seats       = random.randint(s_lo, s_hi)
 
         net_price = price_psm * (1 - discount / 100)
@@ -588,6 +741,7 @@ def generate_contract(account_df, plan_df):
         churned_dt   = parse_dt(acc['_churned_at'])
         realized_pps = round(mrr / seats, 2) if seats > 0 else 0.0
         addon_mrr    = round(random.uniform(0, 100), 2) if icp_seg == 'Enterprise' else 0.0
+        deal_band    = band_from_edges(arr, DEAL_SIZE_BAND_EDGES, DEAL_SIZE_BANDS)
 
         status = 'active'
         if churned_dt and churned_dt < SIM_END:
@@ -609,6 +763,7 @@ def generate_contract(account_df, plan_df):
             'discount_pct':            discount,
             'realized_price_per_seat': realized_pps,
             'addon_mrr':               addon_mrr,
+            'deal_size_band':          deal_band,
             'time_period':             start_at.strftime('%Y-%m'),
         })
 
@@ -619,6 +774,7 @@ def generate_contract(account_df, plan_df):
             r_mrr        = round(mrr * random.uniform(1.0, 1.15), 2)
             r_arr        = round(r_mrr * 12, 2)
             r_realized   = round(r_mrr / seats, 2) if seats > 0 else 0.0
+            r_deal_band  = band_from_edges(r_arr, DEAL_SIZE_BAND_EDGES, DEAL_SIZE_BANDS)
             rows.append({
                 'contract_id':             uid(),
                 'account_id':              acc['account_id'],
@@ -634,9 +790,81 @@ def generate_contract(account_df, plan_df):
                 'discount_pct':            discount,
                 'realized_price_per_seat': r_realized,
                 'addon_mrr':               0.0,
+                'deal_size_band':          r_deal_band,
                 'time_period':             r_start.strftime('%Y-%m'),
             })
 
+    return pd.DataFrame(rows)
+
+
+def update_contract_utilisation(contract_df, seat_df):
+    """seats-used vs. seats-purchased -> seat_utilisation_pct + band, per contract."""
+    contract_df = contract_df.copy()
+    seat_counts = seat_df.groupby('account_id').size().rename('_actual_seats').reset_index()
+    contract_df = contract_df.merge(seat_counts, on='account_id', how='left')
+    contract_df['_actual_seats'] = contract_df['_actual_seats'].fillna(0).astype(int)
+    contract_df['seats_used'] = contract_df[['_actual_seats', 'seat_count']].min(axis=1)
+    contract_df['seat_utilisation_pct'] = (
+        contract_df['seats_used'] / contract_df['seat_count'].replace(0, np.nan)
+    ).fillna(0).round(4).clip(upper=1.0)
+    contract_df['utilisation_band'] = contract_df['seat_utilisation_pct'].apply(
+        lambda p: band_from_edges(p, UTILISATION_BAND_EDGES, UTILISATION_BANDS)
+    )
+    contract_df.drop(columns=['_actual_seats'], inplace=True)
+    return contract_df
+
+
+def generate_discount_grant(contract_df):
+    df = contract_df[contract_df['discount_pct'] > 0]
+    rows = [{
+        'grant_id':     uid(),
+        'contract_id':  c['contract_id'],
+        'account_id':   c['account_id'],
+        'discount_pct': c['discount_pct'],
+        'granted_at':   c['start_at'],
+        'time_period':  c['time_period'],
+    } for _, c in df.iterrows()]
+    return pd.DataFrame(rows)
+
+
+def generate_price_change_event():
+    """Derived purely from PLAN_MASTER's SCD-2 versions — every real price change,
+    materialized as a discrete event row instead of only living in static fields."""
+    by_tier = {}
+    for p in PLAN_MASTER:
+        by_tier.setdefault(p['tier'], []).append(p)
+
+    rows = []
+    for tier, versions in by_tier.items():
+        versions_sorted = sorted(versions, key=lambda p: p['effective_from'])
+        for i in range(1, len(versions_sorted)):
+            old, new = versions_sorted[i - 1], versions_sorted[i]
+            rows.append({
+                'price_change_id':   uid(),
+                'plan_tier':         tier,
+                'old_price_per_seat': old['list_price_per_seat'],
+                'new_price_per_seat': new['list_price_per_seat'],
+                'effective_at':      new['effective_from'] + ' 00:00:00',
+                'time_period':       new['effective_from'][:7],
+            })
+    return pd.DataFrame(rows)
+
+
+def generate_addon_attach(contract_df):
+    df = contract_df[contract_df['addon_mrr'] > 0]
+    rows = []
+    for _, c in df.iterrows():
+        addon = random.choice(ADDON_CATALOG)
+        rows.append({
+            'attach_id':   uid(),
+            'contract_id': c['contract_id'],
+            'account_id':  c['account_id'],
+            'addon_id':    addon['addon_id'],
+            'addon_name':  addon['addon_name'],
+            'addon_mrr':   c['addon_mrr'],
+            'attached_at': c['start_at'],
+            'time_period': c['time_period'],
+        })
     return pd.DataFrame(rows)
 
 
@@ -662,6 +890,9 @@ def generate_usage_event(user_df, account_df):
         signup_at   = pd.to_datetime(usr['signup_at'])
         lifecycle   = usr['lifecycle_state']
         acc_churn   = parse_dt(usr['_churned_at'])
+        onboarding_steps_for_user = (
+            ONBOARDING_STEPS_SELF_SERVE if usr['motion'] == 'Self-serve' else ONBOARDING_STEPS_SALES_LED
+        )
 
         bucket = USER_LIFECYCLE_TO_EVENT_BUCKET.get(lifecycle, 'Active')
         lo, hi = EVENTS_PER_MONTH.get(bucket, (0, 0))
@@ -698,7 +929,7 @@ def generate_usage_event(user_df, account_df):
                 )
 
                 onboarding_step = None
-                if onboarding_eligible and evt_name in ONBOARDING_STEPS:
+                if onboarding_eligible and evt_name in onboarding_steps_for_user:
                     onboarding_step = evt_name
 
                 rows.append({
@@ -790,18 +1021,51 @@ def generate_support_ticket(account_df, user_df):
     return pd.DataFrame(rows)
 
 
+# ─────────────────────────── 11b. QBR ───────────────────────────────────────
+
+def generate_qbr(account_df):
+    """Quarterly business reviews — high-touch (Business/Enterprise) accounts
+    with a CSM only. HTML's `QBR` activity, previously not modeled at all."""
+    rows = []
+    eligible = account_df[
+        (account_df['_tier'].isin(QBR_ELIGIBLE_TIERS)) & (account_df['csm_owner_id'].notna())
+    ]
+    quarter_starts = pd.date_range('2025-01-01', '2026-09-01', freq='QS')
+
+    for _, acc in eligible.iterrows():
+        created = pd.to_datetime(acc['created_at'])
+        churned = parse_dt(acc['_churned_at'])
+        end_bound = churned if churned else SIM_END
+
+        for q in quarter_starts:
+            if q < created or q > pd.Timestamp(end_bound):
+                continue
+            qbr_date = rand_business_dt(q.to_pydatetime(), (q + pd.Timedelta(days=80)).to_pydatetime())
+            if qbr_date > SIM_END:
+                continue
+            rows.append({
+                'qbr_id':      uid(),
+                'account_id':  acc['account_id'],
+                'csm_id':      acc['csm_owner_id'],
+                'qbr_date':    fmt(qbr_date),
+                'time_period': qbr_date.strftime('%Y-%m'),
+            })
+
+    return pd.DataFrame(rows)
+
+
 # ─────────────────────────── 12. ExpansionOpportunity ───────────────────────
 
-def generate_expansion_opportunity(account_df, user_df):
+def generate_expansion_opportunity(account_df, user_df, plan_df):
     rows = []
 
+    price_map = {row['plan_id']: row['list_price_per_seat'] for _, row in plan_df.iterrows()}
     acc_csm  = account_df.set_index('account_id')['csm_owner_id'].to_dict()
-    acc_plan = account_df.set_index('account_id')['current_plan_id'].to_dict()
     acc_self_serve = account_df.set_index('account_id')['is_self_serve'].to_dict()
 
     cutoff_str = (pd.Timestamp(SIM_END) - pd.Timedelta(days=60)).strftime('%Y-%m-%d %H:%M:%S')
     eligible = account_df[
-        (account_df['lifecycle_state'].isin(['Active', 'Reactivated'])) &
+        (account_df['lifecycle_state'].isin(['Active', 'Reactivated', 'Core', 'Power'])) &
         (account_df['_is_paid'] == True) &
         (account_df['created_at'] <= cutoff_str)
     ].copy().reset_index(drop=True)
@@ -809,11 +1073,12 @@ def generate_expansion_opportunity(account_df, user_df):
     eligible = eligible.sample(frac=0.80, random_state=42)
 
     plan_upgrade_map = {
-        'plan_free':       ('plan_plus_v2', 15.0),
-        'plan_plus_v2':    ('plan_business', 35.0),
-        'plan_plus_v1':    ('plan_business', 35.0),
-        'plan_business':   ('plan_enterprise', 75.0),
-        'plan_enterprise': ('plan_enterprise', 75.0),
+        'plan_free':          'plan_plus_v2',
+        'plan_plus_v1':       'plan_business_v2',
+        'plan_plus_v2':       'plan_business_v2',
+        'plan_business_v1':   'plan_enterprise',
+        'plan_business_v2':   'plan_enterprise',
+        'plan_enterprise':    'plan_enterprise',
     }
 
     for _, acc in eligible.iterrows():
@@ -823,30 +1088,32 @@ def generate_expansion_opportunity(account_df, user_df):
 
         for _ in range(n_opps):
             trigger  = random.choice(EXPANSION_TYPES)
-            motion   = 'plg_inapp' if is_plg else weighted_choice(EXPANSION_MOTION_TYPES, EXPANSION_MOTION_WEIGHTS)
+            motion   = 'Self-serve' if is_plg else weighted_choice(EXPANSION_MOTION_TYPES, EXPANSION_MOTION_WEIGHTS)
             identified_at = rand_business_dt(
                 (created + timedelta(days=60)).to_pydatetime() if hasattr(created + timedelta(days=60), 'to_pydatetime') else created + timedelta(days=60),
                 min(SIM_END, (created + timedelta(days=300)).to_pydatetime() if hasattr(created + timedelta(days=300), 'to_pydatetime') else created + timedelta(days=300))
             )
 
-            curr_plan = acc['current_plan_id']
-            prop_plan, prop_price = plan_upgrade_map.get(curr_plan, (curr_plan, 35.0))
+            curr_plan  = acc['current_plan_id']
+            prop_plan  = plan_upgrade_map.get(curr_plan, curr_plan)
+            curr_price = price_map.get(curr_plan, 35.0)
+            prop_price = price_map.get(prop_plan, curr_price)
 
             curr_seats   = random.randint(2, 20)
             prop_seats   = curr_seats + random.randint(2, 15)
             seats_elig   = prop_seats - curr_seats
-            exp_mrr      = round((prop_price - 35.0) * prop_seats + seats_elig * 35.0, 2)
+            exp_mrr      = round((prop_price - curr_price) * prop_seats + seats_elig * curr_price, 2)
             exp_mrr      = max(exp_mrr, 100.0)
 
             stage_roll = random.random()
             if stage_roll < 0.25:
                 upsell_status = 'Closed Won'
                 outcome       = 'Won'
-                closed_at     = identified_at + timedelta(days=random.randint(14, 60))
+                closed_at     = min(identified_at + timedelta(days=random.randint(14, 60)), SIM_END)
             elif stage_roll < 0.40:
                 upsell_status = 'Closed Lost'
                 outcome       = 'Lost'
-                closed_at     = identified_at + timedelta(days=random.randint(14, 45))
+                closed_at     = min(identified_at + timedelta(days=random.randint(14, 45)), SIM_END)
             else:
                 upsell_status = random.choice(['Identified', 'Qualifying', 'Proposed', 'Negotiating'])
                 outcome       = 'Open'
@@ -870,6 +1137,63 @@ def generate_expansion_opportunity(account_df, user_df):
                 'outcome':               outcome,
                 'time_period':           identified_at.strftime('%Y-%m'),
             })
+
+    return pd.DataFrame(rows)
+
+
+def generate_team(account_df):
+    """The HTML's `Team` entity — sub-groupings within Mid-market/Enterprise
+    accounts (SMB accounts are single-team, so excluded)."""
+    rows = []
+    eligible = account_df[account_df['segment'].isin(['Mid-market', 'Enterprise'])]
+    for _, acc in eligible.iterrows():
+        n_teams = random.randint(2, 5) if acc['segment'] == 'Enterprise' else random.randint(1, 3)
+        depts = random.sample(USER_DEPARTMENTS, min(n_teams, len(USER_DEPARTMENTS)))
+        for dept in depts:
+            rows.append({
+                'team_id':     uid(),
+                'account_id':  acc['account_id'],
+                'team_name':   dept,
+                'created_at':  acc['created_at'],
+                'time_period': acc['time_period'],
+            })
+    return pd.DataFrame(rows)
+
+
+def generate_expansion_activity(expansion_df):
+    """Projects each opportunity into the HTML's discrete activities
+    (hit_limit / upsell_convo / seat_add / tier_upgrade / add_on_buy) instead
+    of leaving them collapsed into one categorical trigger field."""
+    rows = []
+    for _, opp in expansion_df.iterrows():
+        if opp['trigger_type'] in ('limit_hit', 'utilization_high'):
+            rows.append({
+                'activity_id': uid(), 'opp_id': opp['opp_id'], 'account_id': opp['account_id'],
+                'activity_type': 'hit_limit', 'occurred_at': opp['identified_at'], 'time_period': opp['time_period'],
+            })
+
+        rows.append({
+            'activity_id': uid(), 'opp_id': opp['opp_id'], 'account_id': opp['account_id'],
+            'activity_type': 'upsell_convo', 'occurred_at': opp['identified_at'], 'time_period': opp['time_period'],
+        })
+
+        if opp['outcome'] == 'Won' and opp['closed_at']:
+            closed_period = pd.to_datetime(opp['closed_at']).strftime('%Y-%m')
+            if opp['seats_eligible'] > 0:
+                rows.append({
+                    'activity_id': uid(), 'opp_id': opp['opp_id'], 'account_id': opp['account_id'],
+                    'activity_type': 'seat_add', 'occurred_at': opp['closed_at'], 'time_period': closed_period,
+                })
+            if opp['proposed_plan_id'] != opp['current_plan_id']:
+                rows.append({
+                    'activity_id': uid(), 'opp_id': opp['opp_id'], 'account_id': opp['account_id'],
+                    'activity_type': 'tier_upgrade', 'occurred_at': opp['closed_at'], 'time_period': closed_period,
+                })
+            if opp['trigger_type'] == 'addon_signal':
+                rows.append({
+                    'activity_id': uid(), 'opp_id': opp['opp_id'], 'account_id': opp['account_id'],
+                    'activity_type': 'add_on_buy', 'occurred_at': opp['closed_at'], 'time_period': closed_period,
+                })
 
     return pd.DataFrame(rows)
 
@@ -901,7 +1225,7 @@ def generate_health_score_snapshot(account_df, usage_event_df, plan_df, support_
     st['opened_at']   = pd.to_datetime(st['opened_at'])
     st['resolved_at'] = pd.to_datetime(st['resolved_at'])
 
-    all_weeks = pd.date_range('2025-01-06', '2026-08-25', freq='W-MON')
+    all_weeks = pd.date_range('2025-01-06', '2026-09-30', freq='W-MON')
 
     print("  Building account×week base frame...")
     acc_week_rows = []
@@ -958,10 +1282,11 @@ def generate_health_score_snapshot(account_df, usage_event_df, plan_df, support_
     noise          = np.random.normal(0, 4, len(base))
     base['score']  = (base['score_raw'] + noise).clip(0, 100).round(1)
 
+    # Green/Yellow/Red — the HTML's health-band naming (was red/amber/green).
     base['health_band'] = pd.cut(
         base['score'],
         bins=[-0.01, 49.99, 74.99, 100.01],
-        labels=['red', 'amber', 'green']
+        labels=['Red', 'Yellow', 'Green']
     ).astype(str)
 
     base['snapshot_id'] = [uid() for _ in range(len(base))]
@@ -978,14 +1303,294 @@ def generate_health_score_snapshot(account_df, usage_event_df, plan_df, support_
     return result
 
 
+# ─────────────────────────── 14. MRR movement (Revenue engine) ──────────────
+
+def generate_mrr_movement(account_df, contract_df, expansion_df):
+    """The cross-space MRR waterfall bridge: new/reactivate/expand/contract/
+    churn/renew, tagged by which functional `space` drove it. This is the
+    single addition that makes NRR/GRR/Net New MRR computable."""
+    rows = []
+    acc_lookup = account_df.set_index('account_id').to_dict('index')
+
+    contracts_by_account = contract_df.sort_values('start_at').groupby('account_id')
+
+    for account_id, grp in contracts_by_account:
+        acc = acc_lookup.get(account_id)
+        if acc is None:
+            continue
+        grp = grp.reset_index(drop=True)
+        segment  = acc['segment']
+        motion   = acc['motion']
+        plan_tier = acc['_tier']
+
+        first = grp.iloc[0]
+        first_start = pd.to_datetime(first['start_at'])
+        rows.append({
+            'movement_id': uid(), 'account_id': account_id, 'movement_type': 'new',
+            'mrr_delta_usd': first['mrr'], 'seats_delta': int(first['seat_count']),
+            'space': 'Acquisition', 'motion': motion, 'segment': segment, 'plan_tier': plan_tier,
+            'occurred_at': fmt(first_start), 'time_period': first_start.strftime('%Y-%m'),
+        })
+
+        for i in range(1, len(grp)):
+            prev, cur = grp.iloc[i - 1], grp.iloc[i]
+            delta = round(cur['mrr'] - prev['mrr'], 2)
+            r_start = pd.to_datetime(cur['start_at'])
+            rows.append({
+                'movement_id': uid(), 'account_id': account_id, 'movement_type': 'renew',
+                'mrr_delta_usd': delta, 'seats_delta': 0,
+                'space': 'Retention', 'motion': motion, 'segment': segment, 'plan_tier': plan_tier,
+                'occurred_at': fmt(r_start), 'time_period': r_start.strftime('%Y-%m'),
+            })
+
+        last = grp.iloc[-1]
+        if last['status'] == 'churned':
+            churn_dt = pd.to_datetime(last['end_at'])
+            rows.append({
+                'movement_id': uid(), 'account_id': account_id, 'movement_type': 'churn',
+                'mrr_delta_usd': -round(last['mrr'], 2), 'seats_delta': -int(last['seat_count']),
+                'space': 'Retention', 'motion': motion, 'segment': segment, 'plan_tier': plan_tier,
+                'occurred_at': fmt(churn_dt), 'time_period': churn_dt.strftime('%Y-%m'),
+            })
+
+        # Reactivation timing isn't tracked precisely on Account today (only a
+        # static lifecycle label) — approximated at 90-180 days after first
+        # contract start. Flagged simplification, not a real signal.
+        if acc['lifecycle_state'] == 'Reactivated':
+            react_dt = first_start + timedelta(days=random.randint(90, 180))
+            if react_dt <= SIM_END:
+                rows.append({
+                    'movement_id': uid(), 'account_id': account_id, 'movement_type': 'reactivate',
+                    'mrr_delta_usd': round(first['mrr'] * 0.6, 2), 'seats_delta': 0,
+                    'space': 'Retention', 'motion': motion, 'segment': segment, 'plan_tier': plan_tier,
+                    'occurred_at': fmt(react_dt), 'time_period': react_dt.strftime('%Y-%m'),
+                })
+
+    # Expand: from Won expansion opportunities
+    won = expansion_df[expansion_df['outcome'] == 'Won']
+    for _, opp in won.iterrows():
+        closed_dt = parse_dt(opp['closed_at'])
+        if closed_dt is None:
+            continue
+        acc = acc_lookup.get(opp['account_id'])
+        if acc is None:
+            continue
+        rows.append({
+            'movement_id': uid(), 'account_id': opp['account_id'], 'movement_type': 'expand',
+            'mrr_delta_usd': round(opp['expected_mrr_uplift'], 2), 'seats_delta': int(opp['seats_eligible']),
+            'space': 'Expansion', 'motion': acc['motion'], 'segment': acc['segment'], 'plan_tier': acc['_tier'],
+            'occurred_at': fmt(closed_dt), 'time_period': closed_dt.strftime('%Y-%m'),
+        })
+
+    # Contraction: no real signal exists anywhere else in the data today (no
+    # downgrade/seat-reduction events are tracked). A modest synthetic sample
+    # of active accounts gets a small negative movement, so GRR/NRR actually
+    # exercise the Contraction term instead of trivially never firing.
+    active_accounts = account_df[account_df['lifecycle_state'].isin(['Active', 'Core', 'Power'])]
+    contraction_sample = active_accounts.sample(frac=0.10, random_state=7)
+    contracts_by_acc_latest = contract_df.sort_values('start_at').groupby('account_id').tail(1).set_index('account_id')
+
+    for _, acc in contraction_sample.iterrows():
+        if acc['account_id'] not in contracts_by_acc_latest.index:
+            continue
+        latest = contracts_by_acc_latest.loc[acc['account_id']]
+        created = pd.to_datetime(acc['created_at'])
+        days_available = max((SIM_END - created).days, 121)
+        contraction_dt = created + timedelta(days=random.randint(120, days_available))
+        if contraction_dt > SIM_END:
+            continue
+        drop_pct = random.uniform(0.05, 0.15)
+        rows.append({
+            'movement_id': uid(), 'account_id': acc['account_id'], 'movement_type': 'contract',
+            'mrr_delta_usd': -round(latest['mrr'] * drop_pct, 2), 'seats_delta': 0,
+            'space': 'Expansion', 'motion': acc['motion'], 'segment': acc['segment'], 'plan_tier': acc['_tier'],
+            'occurred_at': fmt(contraction_dt), 'time_period': contraction_dt.strftime('%Y-%m'),
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ─────────────────────────── 15-19. Cost & Burn / P&L ───────────────────────
+
+def generate_vendor():
+    return pd.DataFrame([dict(v) for v in VENDOR_MASTER])
+
+
+def generate_headcount():
+    """Simplified/formulaic — headcount grows at a fixed monthly rate per
+    function; People cost = headcount x avg salary. Not vendor-invoice-level
+    realism (no explicit decision was recorded on cost-modeling depth)."""
+    rows = []
+    counts = dict(HEADCOUNT_START)
+    for month_dt in MONTH_RANGE:
+        period = month_dt.strftime('%Y-%m')
+        for fn in FUNCTIONS:
+            headcount = counts[fn]
+            salary = AVG_MONTHLY_SALARY_USD_BY_FUNCTION[fn]
+            rows.append({
+                'headcount_id':          f'HC-{period}-{fn.replace("&", "").replace(" ", "")}',
+                'function':              fn,
+                'headcount_count':       round(headcount),
+                'avg_monthly_salary_usd': salary,
+                'people_cost_usd':       round(headcount * salary, 2),
+                'time_period':           period,
+            })
+            counts[fn] = counts[fn] * (1 + HEADCOUNT_MONTHLY_GROWTH[fn])
+    return pd.DataFrame(rows)
+
+
+def generate_cost_transaction(account_df, contract_df, vendor_df):
+    """Cloud & infra / AI inference / Other cost lines, by vendor, by month.
+    People cost lives in `headcount` instead (headcount-driven, not vendor-driven)."""
+    rows = []
+
+    for month_idx, month_dt in enumerate(MONTH_RANGE):
+        period = month_dt.strftime('%Y-%m')
+        month_s = month_dt.to_pydatetime()
+        month_e = month_end(month_s)
+
+        active_mask = (pd.to_datetime(account_df['created_at']) <= month_e)
+        churned_dates = account_df['_churned_at'].apply(parse_dt)
+        active_mask &= (churned_dates.isna() | (pd.Series(churned_dates.tolist(), index=account_df.index) >= month_s))
+        n_active = int(active_mask.sum())
+
+        mrr_this_month = contract_df[
+            (pd.to_datetime(contract_df['start_at']) <= month_e) &
+            (pd.to_datetime(contract_df['end_at']) >= month_s)
+        ]['mrr'].sum()
+
+        cloud_total = CLOUD_COST_BASE_FIXED_USD + n_active * CLOUD_COST_PER_ACCOUNT_USD
+        cloud_vendors = vendor_df[vendor_df['cost_line'] == 'Cloud & infra']
+        for _, v in cloud_vendors.iterrows():
+            rows.append({
+                'cost_id': uid(), 'vendor_id': v['vendor_id'], 'vendor_name': v['vendor_name'],
+                'cost_line': 'Cloud & infra', 'function': 'R&D',
+                'amount_usd': round(cloud_total / len(cloud_vendors), 2),
+                'occurred_at': fmt(month_e), 'time_period': period,
+            })
+
+        ai_rate = AI_INFERENCE_COST_PER_ACCOUNT_USD_START * ((1 + AI_INFERENCE_MONTHLY_RAMP) ** month_idx)
+        ai_vendors = vendor_df[vendor_df['cost_line'] == 'AI inference']
+        for _, v in ai_vendors.iterrows():
+            rows.append({
+                'cost_id': uid(), 'vendor_id': v['vendor_id'], 'vendor_name': v['vendor_name'],
+                'cost_line': 'AI inference', 'function': 'R&D',
+                'amount_usd': round(n_active * ai_rate, 2),
+                'occurred_at': fmt(month_e), 'time_period': period,
+            })
+
+        other_total = OTHER_COST_BASE_FIXED_USD + mrr_this_month * OTHER_COST_PCT_OF_MRR
+        other_vendors = vendor_df[vendor_df['cost_line'] == 'Other']
+        for _, v in other_vendors.iterrows():
+            rows.append({
+                'cost_id': uid(), 'vendor_id': v['vendor_id'], 'vendor_name': v['vendor_name'],
+                'cost_line': 'Other', 'function': 'G&A',
+                'amount_usd': round(other_total / len(other_vendors), 2),
+                'occurred_at': fmt(month_e), 'time_period': period,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def generate_revenue_line(contract_df):
+    """The `Revenue line` entity: Revenue = MRR (Subscription) + Services.
+    Services didn't exist anywhere before — small % of MRR, by design."""
+    rows = []
+    for month_dt in MONTH_RANGE:
+        period = month_dt.strftime('%Y-%m')
+        month_s = month_dt.to_pydatetime()
+        month_e = month_end(month_s)
+
+        mrr_this_month = contract_df[
+            (pd.to_datetime(contract_df['start_at']) <= month_e) &
+            (pd.to_datetime(contract_df['end_at']) >= month_s)
+        ]['mrr'].sum()
+
+        rows.append({'revenue_line_id': uid(), 'revenue_type': 'Subscription',
+                      'amount_usd': round(mrr_this_month, 2), 'occurred_at': fmt(month_e), 'time_period': period})
+        rows.append({'revenue_line_id': uid(), 'revenue_type': 'Services',
+                      'amount_usd': round(mrr_this_month * SERVICES_REVENUE_PCT_OF_MRR, 2),
+                      'occurred_at': fmt(month_e), 'time_period': period})
+    return pd.DataFrame(rows)
+
+
+def generate_cash(cost_transaction_df, headcount_df, revenue_line_df):
+    """The `Cash` entity: a tracked stock (opening balance + period deltas),
+    not derivable purely from Revenue-minus-Cost without an anchor value."""
+    rows = []
+    cash = OPENING_CASH_USD
+    for month_dt in MONTH_RANGE:
+        period = month_dt.strftime('%Y-%m')
+        month_e = month_end(month_dt.to_pydatetime())
+
+        cost    = cost_transaction_df[cost_transaction_df['time_period'] == period]['amount_usd'].sum()
+        people  = headcount_df[headcount_df['time_period'] == period]['people_cost_usd'].sum()
+        revenue = revenue_line_df[revenue_line_df['time_period'] == period]['amount_usd'].sum()
+
+        net_change = round(revenue - cost - people, 2)
+        cash = round(cash + net_change, 2)
+
+        rows.append({
+            'cash_id': uid(), 'time_period': period, 'as_of': fmt(month_e),
+            'opening_cash_usd': OPENING_CASH_USD, 'net_change_usd': net_change, 'cash_balance_usd': cash,
+        })
+    return pd.DataFrame(rows)
+
+
+# ─────────────────────────── 20-21. Weekly grain (campaign) ─────────────────
+
+def generate_campaign_weekly(campaign_df):
+    """Weekly campaign performance — the monthly aggregate campaign.impressions/
+    clicks/spend can't be sliced weekly on its own; this allocates the monthly
+    totals evenly across the campaign's active weeks (an allocation, not
+    independently observed weekly data — flagged as such)."""
+    rows = []
+    for _, camp in campaign_df.iterrows():
+        start = pd.to_datetime(camp['start_at'])
+        end   = pd.to_datetime(camp['end_at'])
+        if end <= start:
+            end = start + timedelta(days=7)
+
+        weeks = pd.date_range(start.normalize(), end.normalize(), freq='W-MON')
+        if len(weeks) == 0:
+            weeks = pd.DatetimeIndex([start.normalize()])
+        n_weeks = len(weeks)
+
+        for w in weeks:
+            rows.append({
+                'campaign_id': camp['campaign_id'],
+                'week_start':  fmt(w),
+                'channel':     camp['channel'],
+                'impressions': int(camp['impressions'] / n_weeks),
+                'clicks':      int(camp['clicks'] / n_weeks),
+                'conversions': max(0, int(camp['conversions'] / n_weeks)),
+                'spend':       round(camp['spend'] / n_weeks, 2),
+                'time_period': camp['time_period'],
+            })
+    return pd.DataFrame(rows)
+
+
 # ─────────────────────────── Validation ─────────────────────────────────────
 
 def validate_all(dfs):
     print("\n── Validation ──────────────────────────────────────────────────────────")
-    expected_months = 20
+    expected_months = 21
     all_ok = True
 
+    # Static reference/catalog tables: no time_period expected, skip that check.
+    STATIC = {'vendor'}
+    # Genuinely sparse-by-nature tables (event-driven, not one-row-per-month):
+    # a low or uneven month count here is expected, not a data-quality issue.
+    EXEMPT = {
+        'expansion_opportunity', 'qbr', 'discount_grant', 'price_change_event',
+        'addon_attach', 'team', 'creative', 'expansion_activity',
+    }
+
     for name, df in dfs.items():
+        if name in STATIC:
+            print(f"  {name:30s}: {len(df):>8,} rows | static reference table")
+            continue
+
         if 'time_period' not in df.columns:
             print(f"  [WARN] {name}: missing time_period column")
             all_ok = False
@@ -996,7 +1601,6 @@ def validate_all(dfs):
         max_tp   = df['time_period'].max()
         print(f"  {name:30s}: {len(df):>8,} rows | {n_months:>2} months | {min_tp} → {max_tp}")
 
-        EXEMPT = {'expansion_opportunity'}
         if n_months < expected_months and name not in EXEMPT:
             print(f"    [WARN] Only {n_months} months covered (expected {expected_months})")
             all_ok = False
@@ -1012,14 +1616,17 @@ def validate_all(dfs):
     account_ids = set(dfs['account'].account_id.tolist())
 
     for tbl, col, ref_set, ref_name in [
-        ('user',           'account_id',  account_ids, 'account'),
-        ('seat',           'account_id',  account_ids, 'account'),
-        ('seat',           'user_id',     user_ids,    'user'),
-        ('usage_event',    'account_id',  account_ids, 'account'),
-        ('usage_event',    'user_id',     user_ids,    'user'),
-        ('support_ticket', 'account_id',  account_ids, 'account'),
-        ('support_ticket', 'user_id',     user_ids,    'user'),
-        ('contract',       'account_id',  account_ids, 'account'),
+        ('user',                'account_id', account_ids, 'account'),
+        ('seat',                'account_id', account_ids, 'account'),
+        ('seat',                'user_id',    user_ids,    'user'),
+        ('usage_event',         'account_id', account_ids, 'account'),
+        ('usage_event',         'user_id',    user_ids,    'user'),
+        ('support_ticket',      'account_id', account_ids, 'account'),
+        ('support_ticket',      'user_id',    user_ids,    'user'),
+        ('contract',            'account_id', account_ids, 'account'),
+        ('mrr_movement',        'account_id', account_ids, 'account'),
+        ('qbr',                 'account_id', account_ids, 'account'),
+        ('team',                'account_id', account_ids, 'account'),
     ]:
         if tbl not in dfs or col not in dfs[tbl].columns:
             continue
@@ -1047,47 +1654,98 @@ def main():
     print(f"Range: {SIM_START.date()} → {SIM_END.date()} | Seed: 42")
     print("=" * 70)
 
-    print("\n[1/13] DimCSM")
+    print("\n[1] DimCSM")
     csm_df = generate_dim_csm()
 
-    print("[2/13] Plan")
+    print("[2] Plan")
     plan_df = generate_plan()
 
-    print("[3/13] Campaign")
+    print("[3] Campaign")
     campaign_df = generate_campaign()
 
-    print("[4/13] Account")
+    print("[3b] Creative")
+    creative_df = generate_creative(campaign_df)
+
+    print("[4] Account")
     account_df = generate_account(plan_df, csm_df)
 
-    print("[5/13] Cohort (initial)")
+    print("[5] Cohort (initial)")
     cohort_df = generate_cohort()
 
-    print("[6/13] User")
+    print("[6] User")
     user_df = generate_user(account_df, cohort_df)
 
-    print("[6b]   Updating cohort counts")
+    print("[6b] Updating cohort counts")
     cohort_df = update_cohort(cohort_df, user_df, account_df)
 
-    print("[7/13] Visitor")
-    visitor_df = generate_visitor(campaign_df, user_df)
+    print("[6c] Cohort (weekly)")
+    cohort_weekly_df = generate_cohort_weekly(user_df)
 
-    print("[8/13] Seat")
+    print("[7] Visitor")
+    visitor_df = generate_visitor(campaign_df, user_df, creative_df)
+
+    print("[8] Seat")
     seat_df = generate_seat(account_df, user_df, plan_df)
 
-    print("[9/13] Contract")
+    print("[9] Contract")
     contract_df = generate_contract(account_df, plan_df)
 
-    print("[10/13] UsageEvent")
+    print("[9a] Updating account size bands")
+    account_df = update_account_size_band(account_df, contract_df)
+
+    print("[9b] Updating contract utilisation")
+    contract_df = update_contract_utilisation(contract_df, seat_df)
+
+    print("[9c] Discount grants")
+    discount_grant_df = generate_discount_grant(contract_df)
+
+    print("[9d] Price change events")
+    price_change_df = generate_price_change_event()
+
+    print("[9e] Add-on attach")
+    addon_attach_df = generate_addon_attach(contract_df)
+
+    print("[10] UsageEvent")
     usage_event_df = generate_usage_event(user_df, account_df)
 
-    print("[11/13] SupportTicket")
+    print("[11] SupportTicket")
     support_ticket_df = generate_support_ticket(account_df, user_df)
 
-    print("[12/13] ExpansionOpportunity")
-    expansion_df = generate_expansion_opportunity(account_df, user_df)
+    print("[11b] QBR")
+    qbr_df = generate_qbr(account_df)
 
-    print("[13/13] HealthScoreSnapshot")
+    print("[12] ExpansionOpportunity")
+    expansion_df = generate_expansion_opportunity(account_df, user_df, plan_df)
+
+    print("[12b] Team")
+    team_df = generate_team(account_df)
+
+    print("[12c] Expansion activity")
+    expansion_activity_df = generate_expansion_activity(expansion_df)
+
+    print("[13] HealthScoreSnapshot")
     health_df = generate_health_score_snapshot(account_df, usage_event_df, plan_df, support_ticket_df)
+
+    print("[14] MRR movement")
+    mrr_movement_df = generate_mrr_movement(account_df, contract_df, expansion_df)
+
+    print("[15] Vendor")
+    vendor_df = generate_vendor()
+
+    print("[16] Headcount")
+    headcount_df = generate_headcount()
+
+    print("[17] Cost transaction")
+    cost_transaction_df = generate_cost_transaction(account_df, contract_df, vendor_df)
+
+    print("[18] Revenue line")
+    revenue_line_df = generate_revenue_line(contract_df)
+
+    print("[19] Cash")
+    cash_df = generate_cash(cost_transaction_df, headcount_df, revenue_line_df)
+
+    print("[20] Campaign (weekly)")
+    campaign_weekly_df = generate_campaign_weekly(campaign_df)
 
     # Drop internal columns
     internal_cols = ['_churned_at', '_tier', '_icp_seg', '_is_paid']
@@ -1101,16 +1759,31 @@ def main():
         'dim_csm':               csm_df,
         'plan':                  plan_df,
         'campaign':              campaign_df,
+        'creative':              creative_df,
         'account':               account_df,
         'cohort':                cohort_df,
+        'cohort_weekly':         cohort_weekly_df,
         'user':                  user_df,
         'visitor':               visitor_df,
         'seat':                  seat_df,
         'contract':              contract_df,
+        'discount_grant':        discount_grant_df,
+        'price_change_event':    price_change_df,
+        'addon_attach':          addon_attach_df,
         'usage_event':           usage_event_df,
         'support_ticket':        support_ticket_df,
+        'qbr':                   qbr_df,
         'expansion_opportunity': expansion_df,
+        'team':                  team_df,
+        'expansion_activity':    expansion_activity_df,
         'health_score_snapshot': health_df,
+        'mrr_movement':          mrr_movement_df,
+        'vendor':                vendor_df,
+        'headcount':             headcount_df,
+        'cost_transaction':      cost_transaction_df,
+        'revenue_line':          revenue_line_df,
+        'cash':                  cash_df,
+        'campaign_weekly':       campaign_weekly_df,
     }
 
     validate_all(dfs)

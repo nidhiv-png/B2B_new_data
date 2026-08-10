@@ -1,103 +1,180 @@
+# Regenerated from the real schema. FK relationships between entities,
+# grounded in the actual *_id columns in simulation.py / clickhouse_ddl.sql.
+
 relationships:
 
-  # Account → Plan (current plan assignment)
+  # Account -> Plan (current plan assignment)
   - source_entity: Account
     target_entity: Plan
     relationship_type: many_to_one
     via: current_plan_id
 
-  # Account → DimCSM (CSM ownership)
+  # Account -> DimCSM (CSM ownership)
   - source_entity: Account
     target_entity: DimCSM
     relationship_type: many_to_one
     via: csm_owner_id
 
-  # User → Account (user belongs to an account)
+  # User -> Account
   - source_entity: User
     target_entity: Account
     relationship_type: many_to_one
     via: account_id
 
-  # User → Cohort (user belongs to a signup cohort)
+  # User -> Cohort
   - source_entity: User
     target_entity: Cohort
     relationship_type: many_to_one
     via: cohort_id
 
-  # Visitor → Campaign (visitor came from a campaign)
+  # Visitor -> Campaign (nullable — Referral-channel visitors have none)
   - source_entity: Visitor
     target_entity: Campaign
     relationship_type: many_to_one
     via: campaign_id
 
-  # Visitor → User (visitor converted to user; nullable)
+  # Visitor -> Creative (nullable, same Referral exception)
+  - source_entity: Visitor
+    target_entity: Creative
+    relationship_type: many_to_one
+    via: creative_id
+
+  # Visitor -> User (converted visitor; nullable)
   - source_entity: Visitor
     target_entity: User
     relationship_type: many_to_one
-    via: user_id
+    via: converted_user_id
 
-  # Seat → Account
+  # Creative -> Campaign
+  - source_entity: Creative
+    target_entity: Campaign
+    relationship_type: many_to_one
+    via: campaign_id
+
+  # CampaignWeekly -> Campaign
+  - source_entity: CampaignWeekly
+    target_entity: Campaign
+    relationship_type: many_to_one
+    via: campaign_id
+
+  # Seat -> Account / User / Plan
   - source_entity: Seat
     target_entity: Account
     relationship_type: many_to_one
     via: account_id
-
-  # Seat → User
   - source_entity: Seat
     target_entity: User
     relationship_type: one_to_one
     via: user_id
-
-  # Seat → Plan
   - source_entity: Seat
     target_entity: Plan
     relationship_type: many_to_one
     via: plan_id
 
-  # Contract → Account
+  # Contract -> Account / Plan
   - source_entity: Contract
     target_entity: Account
     relationship_type: many_to_one
     via: account_id
-
-  # Contract → Plan
   - source_entity: Contract
     target_entity: Plan
     relationship_type: many_to_one
     via: plan_id
 
-  # UsageEvent → User
+  # DiscountGrant -> Contract / Account
+  - source_entity: DiscountGrant
+    target_entity: Contract
+    relationship_type: many_to_one
+    via: contract_id
+  - source_entity: DiscountGrant
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # AddonAttach -> Contract / Account
+  - source_entity: AddonAttach
+    target_entity: Contract
+    relationship_type: many_to_one
+    via: contract_id
+  - source_entity: AddonAttach
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # UsageEvent -> User / Account
   - source_entity: UsageEvent
     target_entity: User
     relationship_type: many_to_one
     via: user_id
-
-  # UsageEvent → Account
   - source_entity: UsageEvent
     target_entity: Account
     relationship_type: many_to_one
     via: account_id
 
-  # SupportTicket → Account
+  # SupportTicket -> Account / User
   - source_entity: SupportTicket
     target_entity: Account
     relationship_type: many_to_one
     via: account_id
-
-  # SupportTicket → User
   - source_entity: SupportTicket
     target_entity: User
     relationship_type: many_to_one
     via: user_id
 
-  # ExpansionOpportunity → Account
+  # QBR -> Account / DimCSM
+  - source_entity: QBR
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+  - source_entity: QBR
+    target_entity: DimCSM
+    relationship_type: many_to_one
+    via: csm_id
+
+  # ExpansionOpportunity -> Account / DimCSM / Plan (current & proposed)
   - source_entity: ExpansionOpportunity
     target_entity: Account
     relationship_type: many_to_one
     via: account_id
+  - source_entity: ExpansionOpportunity
+    target_entity: DimCSM
+    relationship_type: many_to_one
+    via: owner_csm_id
+  - source_entity: ExpansionOpportunity
+    target_entity: Plan
+    relationship_type: many_to_one
+    via: current_plan_id
 
-  # HealthScoreSnapshot → Account
+  # Team -> Account
+  - source_entity: Team
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # ExpansionActivity -> ExpansionOpportunity / Account
+  - source_entity: ExpansionActivity
+    target_entity: ExpansionOpportunity
+    relationship_type: many_to_one
+    via: opp_id
+  - source_entity: ExpansionActivity
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # HealthScoreSnapshot -> Account
   - source_entity: HealthScoreSnapshot
     target_entity: Account
     relationship_type: many_to_one
     via: account_id
+
+  # MrrMovement -> Account (the Company-altitude cross-space bridge)
+  - source_entity: MrrMovement
+    target_entity: Account
+    relationship_type: many_to_one
+    via: account_id
+
+  # CostTransaction -> Vendor
+  - source_entity: CostTransaction
+    target_entity: Vendor
+    relationship_type: many_to_one
+    via: vendor_id
