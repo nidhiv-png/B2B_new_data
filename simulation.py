@@ -902,6 +902,54 @@ def generate_usage_event(user_df, account_df):
         last_active = acc_churn if acc_churn else SIM_END
         last_active = min(last_active, SIM_END)
 
+        # ── Sequential onboarding funnel ────────────────────────────────────
+        # Onboarding steps are generated as a real ordered-per-user sequence,
+        # gated by whether/how far this user actually progressed, instead of
+        # each step being an independent weighted random draw (which produced
+        # a "funnel" that was really just relative event-draw weights, with no
+        # per-user dependency between steps). Anchored to activated_at, which
+        # already encodes this user's real activation outcome: reaching it
+        # means they completed their whole funnel; not reaching it means they
+        # dropped off somewhere before the step that would represent full
+        # activation.
+        activated_at = parse_dt(usr['activated_at'])
+        n_steps = len(onboarding_steps_for_user)
+        if activated_at is not None:
+            n_complete = n_steps
+            window_end = min(activated_at, signup_at + timedelta(days=30), last_active)
+        else:
+            # Didn't activate -> dropped off somewhere in the funnel. Weighted
+            # toward earlier steps so the funnel actually narrows, same shape
+            # as a real drop-off curve rather than a uniform cutoff.
+            weights = [n_steps - i for i in range(n_steps)]
+            n_complete = random.choices(range(n_steps), weights=weights, k=1)[0]
+            window_end = min(signup_at + timedelta(days=30), last_active)
+
+        window_start = signup_at
+        if n_complete > 0 and window_end > window_start:
+            for i in range(n_complete):
+                step_name = onboarding_steps_for_user[i]
+                frac = (i + 1) / (n_steps + 1)
+                jitter = timedelta(hours=random.randint(-6, 6))
+                ts = window_start + (window_end - window_start) * frac + jitter
+                ts = min(max(ts, window_start), window_end)
+                rows.append({
+                    'event_id':             uid(),
+                    'user_id':              usr['user_id'],
+                    'account_id':           usr['account_id'],
+                    'event_name':           step_name,
+                    'feature_name':         evt_feat_map[step_name],
+                    'is_core_action':       evt_core_map[step_name],
+                    'onboarding_step_name': step_name,
+                    'session_id':           uid(),
+                    'platform':             weighted_choice(['web', 'desktop', 'mobile'], [0.60, 0.30, 0.10]),
+                    'occurred_at':          fmt(ts),
+                    'time_period':          ts.strftime('%Y-%m'),
+                })
+
+            if len(rows) >= CHUNK:
+                flush()
+
         cur_month = month_start(signup_at)
         while cur_month <= last_active:
             m_end = min(month_end(cur_month), last_active)
@@ -915,8 +963,6 @@ def generate_usage_event(user_df, account_df):
 
             n_events = max(0, int(random.randint(lo, hi) * scale))
 
-            onboarding_eligible = (signup_at + timedelta(days=30)) > cur_month
-
             for _ in range(n_events):
                 evt_name  = random.choices(evt_names, weights=evt_weights, k=1)[0]
                 is_core   = evt_core_map[evt_name]
@@ -928,9 +974,10 @@ def generate_usage_event(user_df, account_df):
                     m_end.to_pydatetime() if hasattr(m_end, 'to_pydatetime') else m_end
                 )
 
+                # Onboarding-step tagging happens exclusively in the sequential
+                # block above now -- regular monthly events are never tagged,
+                # even if they happen to draw one of the same event names.
                 onboarding_step = None
-                if onboarding_eligible and evt_name in onboarding_steps_for_user:
-                    onboarding_step = evt_name
 
                 rows.append({
                     'event_id':             uid(),
@@ -1305,12 +1352,30 @@ def generate_health_score_snapshot(account_df, usage_event_df, plan_df, support_
 
 # ─────────────────────────── 14. MRR movement (Revenue engine) ──────────────
 
-def generate_mrr_movement(account_df, contract_df, expansion_df):
+def generate_mrr_movement(account_df, contract_df, expansion_df, price_change_df, discount_grant_df):
     """The cross-space MRR waterfall bridge: new/reactivate/expand/contract/
     churn/renew, tagged by which functional `space` drove it. This is the
-    single addition that makes NRR/GRR/Net New MRR computable."""
+    single addition that makes NRR/GRR/Net New MRR computable.
+
+    space attribution:
+      - new: Sales-led deals require an activation/onboarding gate before the
+        contract closes, so they're attributed to Activation; self-serve deals
+        convert directly off Acquisition traffic.
+      - renew: Retention by default, but a renewal that lands in the same
+        period as a price change for that tier (or a discount grant for that
+        account) was pricing-driven, so it's attributed to Monetisation.
+      - churn / reactivate: Retention. expand / contract: Expansion.
+    """
     rows = []
     acc_lookup = account_df.set_index('account_id').to_dict('index')
+
+    price_change_periods_by_tier = {}
+    for _, pc in price_change_df.iterrows():
+        price_change_periods_by_tier.setdefault(pc['plan_tier'], set()).add(pc['time_period'])
+
+    discount_periods_by_account = {}
+    for _, dg in discount_grant_df.iterrows():
+        discount_periods_by_account.setdefault(dg['account_id'], set()).add(dg['time_period'])
 
     contracts_by_account = contract_df.sort_values('start_at').groupby('account_id')
 
@@ -1325,10 +1390,11 @@ def generate_mrr_movement(account_df, contract_df, expansion_df):
 
         first = grp.iloc[0]
         first_start = pd.to_datetime(first['start_at'])
+        new_space = 'Activation' if motion == 'Sales-led' else 'Acquisition'
         rows.append({
             'movement_id': uid(), 'account_id': account_id, 'movement_type': 'new',
             'mrr_delta_usd': first['mrr'], 'seats_delta': int(first['seat_count']),
-            'space': 'Acquisition', 'motion': motion, 'segment': segment, 'plan_tier': plan_tier,
+            'space': new_space, 'motion': motion, 'segment': segment, 'plan_tier': plan_tier,
             'occurred_at': fmt(first_start), 'time_period': first_start.strftime('%Y-%m'),
         })
 
@@ -1336,11 +1402,17 @@ def generate_mrr_movement(account_df, contract_df, expansion_df):
             prev, cur = grp.iloc[i - 1], grp.iloc[i]
             delta = round(cur['mrr'] - prev['mrr'], 2)
             r_start = pd.to_datetime(cur['start_at'])
+            r_period = r_start.strftime('%Y-%m')
+            pricing_driven = (
+                r_period in price_change_periods_by_tier.get(plan_tier, set())
+                or r_period in discount_periods_by_account.get(account_id, set())
+            )
+            renew_space = 'Monetisation' if pricing_driven else 'Retention'
             rows.append({
                 'movement_id': uid(), 'account_id': account_id, 'movement_type': 'renew',
                 'mrr_delta_usd': delta, 'seats_delta': 0,
-                'space': 'Retention', 'motion': motion, 'segment': segment, 'plan_tier': plan_tier,
-                'occurred_at': fmt(r_start), 'time_period': r_start.strftime('%Y-%m'),
+                'space': renew_space, 'motion': motion, 'segment': segment, 'plan_tier': plan_tier,
+                'occurred_at': fmt(r_start), 'time_period': r_period,
             })
 
         last = grp.iloc[-1]
@@ -1439,9 +1511,11 @@ def generate_headcount():
     return pd.DataFrame(rows)
 
 
-def generate_cost_transaction(account_df, contract_df, vendor_df):
-    """Cloud & infra / AI inference / Other cost lines, by vendor, by month.
-    People cost lives in `headcount` instead (headcount-driven, not vendor-driven)."""
+def generate_cost_transaction(account_df, contract_df, vendor_df, headcount_df):
+    """Cloud & infra / AI inference / Other cost lines, by vendor, by month, plus
+    a People cost_line row per period/function sourced from Headcount.people_cost_usd
+    (tagged to the internal-payroll placeholder vendor) so cost_transaction alone
+    is a complete source for any 'Cost by cost_line' breakdown."""
     rows = []
 
     for month_idx, month_dt in enumerate(MONTH_RANGE):
@@ -1489,6 +1563,16 @@ def generate_cost_transaction(account_df, contract_df, vendor_df):
                 'occurred_at': fmt(month_e), 'time_period': period,
             })
 
+        people_vendor = vendor_df[vendor_df['cost_line'] == 'People'].iloc[0]
+        period_headcount = headcount_df[headcount_df['time_period'] == period]
+        for _, hc in period_headcount.iterrows():
+            rows.append({
+                'cost_id': uid(), 'vendor_id': people_vendor['vendor_id'], 'vendor_name': people_vendor['vendor_name'],
+                'cost_line': 'People', 'function': hc['function'],
+                'amount_usd': hc['people_cost_usd'],
+                'occurred_at': fmt(month_e), 'time_period': period,
+            })
+
     return pd.DataFrame(rows)
 
 
@@ -1514,9 +1598,12 @@ def generate_revenue_line(contract_df):
     return pd.DataFrame(rows)
 
 
-def generate_cash(cost_transaction_df, headcount_df, revenue_line_df):
+def generate_cash(cost_transaction_df, revenue_line_df):
     """The `Cash` entity: a tracked stock (opening balance + period deltas),
-    not derivable purely from Revenue-minus-Cost without an anchor value."""
+    not derivable purely from Revenue-minus-Cost without an anchor value.
+    `cost_transaction_df` already includes the People cost_line (sourced from
+    Headcount), so it alone is the complete cost figure here — don't also
+    subtract Headcount separately or People gets double-counted."""
     rows = []
     cash = OPENING_CASH_USD
     for month_dt in MONTH_RANGE:
@@ -1524,15 +1611,15 @@ def generate_cash(cost_transaction_df, headcount_df, revenue_line_df):
         month_e = month_end(month_dt.to_pydatetime())
 
         cost    = cost_transaction_df[cost_transaction_df['time_period'] == period]['amount_usd'].sum()
-        people  = headcount_df[headcount_df['time_period'] == period]['people_cost_usd'].sum()
         revenue = revenue_line_df[revenue_line_df['time_period'] == period]['amount_usd'].sum()
 
-        net_change = round(revenue - cost - people, 2)
+        opening = cash
+        net_change = round(revenue - cost, 2)
         cash = round(cash + net_change, 2)
 
         rows.append({
             'cash_id': uid(), 'time_period': period, 'as_of': fmt(month_e),
-            'opening_cash_usd': OPENING_CASH_USD, 'net_change_usd': net_change, 'cash_balance_usd': cash,
+            'opening_cash_usd': opening, 'net_change_usd': net_change, 'cash_balance_usd': cash,
         })
     return pd.DataFrame(rows)
 
@@ -1727,7 +1814,7 @@ def main():
     health_df = generate_health_score_snapshot(account_df, usage_event_df, plan_df, support_ticket_df)
 
     print("[14] MRR movement")
-    mrr_movement_df = generate_mrr_movement(account_df, contract_df, expansion_df)
+    mrr_movement_df = generate_mrr_movement(account_df, contract_df, expansion_df, price_change_df, discount_grant_df)
 
     print("[15] Vendor")
     vendor_df = generate_vendor()
@@ -1736,13 +1823,13 @@ def main():
     headcount_df = generate_headcount()
 
     print("[17] Cost transaction")
-    cost_transaction_df = generate_cost_transaction(account_df, contract_df, vendor_df)
+    cost_transaction_df = generate_cost_transaction(account_df, contract_df, vendor_df, headcount_df)
 
     print("[18] Revenue line")
     revenue_line_df = generate_revenue_line(contract_df)
 
     print("[19] Cash")
-    cash_df = generate_cash(cost_transaction_df, headcount_df, revenue_line_df)
+    cash_df = generate_cash(cost_transaction_df, revenue_line_df)
 
     print("[20] Campaign (weekly)")
     campaign_weekly_df = generate_campaign_weekly(campaign_df)

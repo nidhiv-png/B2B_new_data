@@ -186,7 +186,7 @@ GEO_WEIGHTS = [0.35, 0.15, 0.10, 0.08, 0.07, 0.07, 0.06, 0.05, 0.04, 0.03]
 # Weights aren't specified by the HTML — this distribution is a plan-flagged
 # assumption, skewed toward SaaS/Tech consistent with the prior data's skew.
 
-INDUSTRIES = ['SaaS/Tech', 'Financial svcs', 'Healthcare', 'Retail', 'Other']
+INDUSTRIES = ['SaaS / Tech', 'Financial svcs', 'Healthcare', 'Retail', 'Other']
 INDUSTRY_WEIGHTS = [0.35, 0.20, 0.15, 0.15, 0.15]
 
 # ─────────────────────────── ICP segments ───────────────────────────────────
@@ -240,14 +240,14 @@ USERS_PER_ACCOUNT = {
 # HTML's own "illustrative" numbers, used only to decide where one banding
 # category ends and the next begins — raw dimension values, not metrics.
 
-ACCOUNT_SIZE_BAND_EDGES = [10, 50, 200]   # <10, 10-50, 50-200, 200+
-ACCOUNT_SIZE_BANDS      = ['<10', '10-50', '50-200', '200+']
+ACCOUNT_SIZE_BAND_EDGES = [10, 50, 200]   # <10 seats, 10-50, 50-200, 200+
+ACCOUNT_SIZE_BANDS      = ['<10 seats', '10–50', '50–200', '200+']
 
 DEAL_SIZE_BAND_EDGES = [5_000, 25_000, 100_000]   # <$5k, $5-25k, $25-100k, $100k+ ACV
-DEAL_SIZE_BANDS      = ['<$5k', '$5-25k', '$25-100k', '$100k+']
+DEAL_SIZE_BANDS      = ['<$5k', '$5–25k', '$25–100k', '$100k+ ACV']
 
 UTILISATION_BAND_EDGES = [0.5, 0.8, 1.0]   # <50%, 50-80%, 80-100%, at limit
-UTILISATION_BANDS      = ['<50%', '50-80%', '80-100%', 'at limit']
+UTILISATION_BANDS      = ['<50%', '50–80%', '80–100%', 'at limit']
 
 # ─────────────────────────── Usage event types ──────────────────────────────
 
@@ -417,6 +417,10 @@ VENDOR_MASTER = [
     {'vendor_id': 'VEN-004', 'vendor_name': 'Datadog',    'cost_line': 'Cloud & infra'},
     {'vendor_id': 'VEN-005', 'vendor_name': 'Stripe',     'cost_line': 'Other'},
     {'vendor_id': 'VEN-006', 'vendor_name': 'Segment',    'cost_line': 'Other'},
+    # Payroll isn't vendor-invoiced, but cost_transaction needs a 'People' row
+    # per period/function so cost_line has all 4 COST_LINES values in one table
+    # instead of People being reachable only via the separate Headcount entity.
+    {'vendor_id': 'VEN-007', 'vendor_name': 'Internal Payroll', 'cost_line': 'People'},
 ]
 
 # Headcount by function, starting count (Jan 2025) and simple monthly growth

@@ -5,7 +5,7 @@ Source of truth for current state: **`simulation.py` + `schema/clickhouse_ddl.sq
 
 **Ground rule from the user, applied throughout this plan:** this codebase never stores metric formulas. `entities.yaml`/`activities.yaml`/`config.py`/`simulation.py` only define entities, columns, and activities — raw data. Metrics (Goal/Drivers/Inputs/Guardrails in the HTML) are computed later, by querying that raw data. So for every metric in the HTML, this plan asks one question only: **do we already have the columns to compute it via a query, or do we need to add/change a column or entity?** No formula gets written into the codebase — only the raw fields required to make the formula answerable downstream.
 
-Nothing in this plan has been implemented.
+**Status: implemented** (commit `cf3a84d`, "Implement Tessera v2 scope: Financial/Company altitudes + terminology alignment"). Post-implementation validation against `vedha_tessera_model_v2.html` found 3 remaining gaps, since fixed — see "Post-implementation fixes" at the end of this document.
 
 ---
 
@@ -297,3 +297,25 @@ This file is **not generic** — it's driven entirely by four hardcoded dicts (`
 ---
 
 Ready to move to implementation once given the go-ahead.
+
+---
+
+## Post-implementation fixes
+
+A validation pass against `vedha_tessera_model_v2.html` after implementation found 3 gaps, all fixed in `config.py`/`simulation.py`:
+
+1. **`space` dimension** — `generate_mrr_movement()` only ever tagged `Acquisition`/`Retention`/`Expansion`; `Activation` and `Monetisation` never appeared. Fixed: `new` movements split `Acquisition`/`Activation` by `motion` (Sales-led implies an activation gate before close); `renew` movements tagged `Monetisation` when they coincide with a `price_change_event` for that tier or a `discount_grant` for that account in the same period, else `Retention`.
+2. **`cost_line = 'People'`** — never appeared in `cost_transaction` (People cost lived only in `Headcount.people_cost_usd`). Fixed: added a placeholder `Internal Payroll` vendor (`VENDOR_MASTER`, cost_line `People`) and a per-period-per-function `cost_transaction` row sourced from `Headcount.people_cost_usd`, so `cost_transaction` alone is a complete source for "Cost by cost_line."
+3. **Verbatim dimension value strings** — `ACCOUNT_SIZE_BANDS`, `DEAL_SIZE_BANDS`, `UTILISATION_BANDS`, `INDUSTRIES` used hyphens/abbreviated labels instead of the HTML's exact text (en-dashes, "seats"/"ACV" suffixes, "SaaS / Tech" spacing). Fixed to match the Dimensions Dictionary verbatim.
+
+Verified in regenerated output: `mrr_movement.space` now has all 5 values (Acquisition 227, Activation 259, Retention 129, Expansion 137, Monetisation 109); `cost_transaction.cost_line` now includes `People` (84 rows); band/industry columns now match the HTML text exactly.
+
+Left as-is (confirmed with the user, no change needed): `login` activity (covered by `UsageEvent.session_id`), Monetisation's `tier change` (covered by Expansion's `tier_upgrade`), and the "Cost centre"/"Subscription"/"Signup" naming — current entity decomposition (`CostTransaction`+`Vendor`+`Headcount`, `Contract`/`Seat`, `Visitor` fields+activity) is accepted as-is.
+
+## Post-load validation fix (`cash` double-count)
+
+Loading the corrected data into ClickHouse and running every metric in `vedha_tessera_model_v2.html` live surfaced one more bug, introduced by fix #2 above: once `cost_transaction` started including `People`-tagged rows, `generate_cash()` was still *also* subtracting `Headcount.people_cost_usd` separately — double-counting People cost and driving `cash_balance_usd` to -$3.76M by the end of the 21-month window (plus `opening_cash_usd` was hardcoded to the $5M seed on every row instead of rolling forward the prior month's close).
+
+Fixed: `generate_cash()` now derives `net_change = revenue - cost` from `cost_transaction` alone (already complete post-fix-#2) and no longer takes a `headcount_df` argument; `opening_cash_usd` now correctly carries forward the prior month's `cash_balance_usd`. Re-verified: cash balance stays positive throughout the full window (min $3.61M in 2025-10, ending at $4.85M in 2026-09) — no further recalibration of headcount growth was needed, the double-count was the sole cause.
+
+Data reloaded into ClickHouse (`b2b_new` @ `3.108.206.137`) after this fix — all 28 tables, 280,990 rows, row counts verified against CSV.
