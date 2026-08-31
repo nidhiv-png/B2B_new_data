@@ -732,21 +732,23 @@ def generate_contract(account_df, plan_df):
         arr       = round(mrr * 12, 2)
 
         start_at  = pd.to_datetime(acc['created_at'])
-        if billing == 'annual':
-            end_at    = start_at + timedelta(days=365)
-        else:
-            end_at    = start_at + timedelta(days=30)
+        term_days = 365 if billing == 'annual' else 30
+        nominal_end_at = start_at + timedelta(days=term_days)
 
-        renewal_at   = end_at + timedelta(days=1)
+        renewal_at   = nominal_end_at + timedelta(days=1)
         churned_dt   = parse_dt(acc['_churned_at'])
         realized_pps = round(mrr / seats, 2) if seats > 0 else 0.0
         addon_mrr    = round(random.uniform(0, 100), 2) if icp_seg == 'Enterprise' else 0.0
         deal_band    = band_from_edges(arr, DEAL_SIZE_BAND_EDGES, DEAL_SIZE_BANDS)
 
+        # Only mark THIS term churned if the account's churn date actually
+        # falls within it -- a churn happening during a later (renewal) term
+        # doesn't make this first term retroactively churned.
         status = 'active'
-        if churned_dt and churned_dt < SIM_END:
+        end_at = nominal_end_at
+        if churned_dt and churned_dt < SIM_END and churned_dt <= nominal_end_at:
             status = 'churned'
-            end_at = min(end_at, churned_dt)
+            end_at = max(start_at, churned_dt)
 
         rows.append({
             'contract_id':             uid(),
@@ -767,11 +769,29 @@ def generate_contract(account_df, plan_df):
             'time_period':             start_at.strftime('%Y-%m'),
         })
 
-        # Renewal contract if within sim window and account is active
-        if billing == 'annual' and status == 'active' and pd.to_datetime(end_at) <= pd.to_datetime(fmt(SIM_END)):
-            r_start      = pd.to_datetime(end_at) + timedelta(days=1)
-            r_end        = r_start + timedelta(days=365)
-            r_mrr        = round(mrr * random.uniform(1.0, 1.15), 2)
+        # Renewal chain: keep renewing at the same cadence for as long as the
+        # account remains active and we're still within the sim window.
+        # Previously this only fired ONCE (a single "if", not a loop), and
+        # only for annual billing -- fine for annual since one 365-day
+        # renewal already covers the whole ~21-month sim window from any
+        # start date, but monthly-billing contracts only ever got ONE 30-day
+        # term, so they "expired" after their first month even though the
+        # account itself kept paying. Both cadences now renew in a proper
+        # loop, stopping at whichever comes first: the account's churn date,
+        # or the end of the sim window. Each term is independently checked
+        # against churned_dt, so a churn during a later renewal term no
+        # longer requires (or wrongly implies) that earlier terms churned too.
+        cur_end    = end_at
+        cur_mrr    = mrr
+        cur_status = status
+        while cur_status == 'active' and pd.to_datetime(cur_end) <= pd.to_datetime(fmt(SIM_END)):
+            r_start  = pd.to_datetime(cur_end) + timedelta(days=1)
+            r_end    = r_start + timedelta(days=term_days)
+            r_status = 'active'
+            if churned_dt and churned_dt < SIM_END and churned_dt <= r_end:
+                r_status = 'churned'
+                r_end = max(r_start, churned_dt)
+            r_mrr        = round(cur_mrr * random.uniform(1.0, 1.15), 2)
             r_arr        = round(r_mrr * 12, 2)
             r_realized   = round(r_mrr / seats, 2) if seats > 0 else 0.0
             r_deal_band  = band_from_edges(r_arr, DEAL_SIZE_BAND_EDGES, DEAL_SIZE_BANDS)
@@ -779,7 +799,7 @@ def generate_contract(account_df, plan_df):
                 'contract_id':             uid(),
                 'account_id':              acc['account_id'],
                 'plan_id':                 plan_id,
-                'status':                  'active',
+                'status':                  r_status,
                 'seat_count':              seats,
                 'mrr':                     r_mrr,
                 'arr':                     r_arr,
@@ -793,8 +813,46 @@ def generate_contract(account_df, plan_df):
                 'deal_size_band':          r_deal_band,
                 'time_period':             r_start.strftime('%Y-%m'),
             })
+            cur_end    = r_end
+            cur_mrr    = r_mrr
+            cur_status = r_status
 
     return pd.DataFrame(rows)
+
+
+def generate_contract_monthly(contract_df):
+    """One row per account per calendar month it was live AT MONTH-END -- a
+    genuine periodic-snapshot fact (same convention already used for
+    headcount/cash/cost_transaction), so 'MRR as of period-end' can be read
+    with a single flat filter instead of the query layer trying to
+    reconstruct 'as of' from a lifetime-grain start_at/end_at pair. Additive
+    -- `contract` stays exactly as it is, still the right source for
+    deal-size/discount/individual-contract-lifecycle needs.
+
+    Deliberately keyed on month-END coverage (start_at <= month_end AND
+    end_at >= month_end), not mere overlap with the month -- an account
+    whose monthly-billing contract renews mid-month (old contract ends the
+    15th, renewal starts the 16th) would otherwise get two overlapping rows
+    for that one month, double-counting its MRR. An account that fully
+    churned before month-end correctly gets zero rows for that month."""
+    start_ts = pd.to_datetime(contract_df['start_at'])
+    end_ts   = pd.to_datetime(contract_df['end_at'])
+
+    chunks = []
+    for month_dt in MONTH_RANGE:
+        period  = month_dt.strftime('%Y-%m')
+        month_e = month_end(month_dt.to_pydatetime())
+
+        live = contract_df[(start_ts <= month_e) & (end_ts >= month_e)][
+            ['contract_id', 'account_id', 'plan_id', 'mrr', 'arr', 'seat_count']
+        ].copy()
+        live['month']       = month_dt.strftime('%Y-%m-%d')
+        live['time_period'] = period
+        chunks.append(live)
+
+    df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+    print(f"  Generated {len(df):,} contract-month snapshot rows")
+    return df
 
 
 def update_contract_utilisation(contract_df, seat_df):
@@ -1783,6 +1841,9 @@ def main():
     print("[9b] Updating contract utilisation")
     contract_df = update_contract_utilisation(contract_df, seat_df)
 
+    print("[9f] Contract monthly snapshot")
+    contract_monthly_df = generate_contract_monthly(contract_df)
+
     print("[9c] Discount grants")
     discount_grant_df = generate_discount_grant(contract_df)
 
@@ -1854,6 +1915,7 @@ def main():
         'visitor':               visitor_df,
         'seat':                  seat_df,
         'contract':              contract_df,
+        'contract_monthly':      contract_monthly_df,
         'discount_grant':        discount_grant_df,
         'price_change_event':    price_change_df,
         'addon_attach':          addon_attach_df,

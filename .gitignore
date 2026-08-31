@@ -18,3 +18,4 @@ __pycache__/
 # env files
 .env
 *.env
+.venv
