@@ -232,6 +232,23 @@ CREATE TABLE b2b_new.contract (
 ) ENGINE = MergeTree()
 ORDER BY (time_period, account_id, contract_id);
 
+-- ─────────────────────────── 12b. contract_monthly (periodic snapshot) ──────
+-- One row per contract per calendar month it was live -- a stock/as-of view,
+-- additive alongside `contract` (which stays lifetime-grain, still the right
+-- source for deal-size/discount/individual-contract-lifecycle needs).
+DROP TABLE IF EXISTS b2b_new.contract_monthly;
+CREATE TABLE b2b_new.contract_monthly (
+    contract_id   String,
+    account_id    String,
+    plan_id       String,
+    mrr           Float64,
+    arr           Float64,
+    seat_count    UInt32,
+    month         String,
+    time_period   String
+) ENGINE = MergeTree()
+ORDER BY (time_period, account_id, contract_id);
+
 -- ─────────────────────────── 13. discount_grant ─────────────────────────────
 DROP TABLE IF EXISTS b2b_new.discount_grant;
 CREATE TABLE b2b_new.discount_grant (
